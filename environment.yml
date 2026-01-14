@@ -1,0 +1,31 @@
+name: feedback
+channels:
+  - https://nexus.it.census.gov:8443/repository/conda-premium-proxy/main
+  - https://nexus.it.census.gov:8443/repository/conda-proxy/free
+  - https://nexus.it.census.gov:8443/repository/conda-premium-proxy/r
+  - https://nexus.it.census.gov:8443/repository/conda-premium-proxy/msys2
+  - https://nexus.it.census.gov:8443/repository/conda-proxy/conda-forge
+
+dependencies:
+  - python=3.11
+  - pip
+
+  # data/table
+  - pandas
+  - numpy
+  - openpyxl
+  - tqdm
+
+  # document + pdf
+  - pypdf
+  - python-docx
+  - pymupdf
+  - pillow
+
+  # OCR tooling
+  - tesseract
+  - pytesseract
+  - pdf2image
+
+  # poppler provides pdftoppm/pdftocairo binaries used by pdf2image
+  - poppler
