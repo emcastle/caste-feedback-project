@@ -7,19 +7,22 @@ conda run -n feedback python run_extraction_smoke_test.py --root data\_test_inpu
 conda run -n feedback python run_extraction_smoke_test.py --root data\_test_input --out data\_test_output --ext .csv
 """
 
-from __future__ import annotations
 
+from __future__ import annotations
+import sys
 import argparse
 from pathlib import Path
 
 import pandas as pd
 
+sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
+
 # Import your discovery + handlers
 # Update these imports to match your actual module paths.
-from Caste_Project.ingest.discovery import build_manifest  # expected: build_manifest(root: Path) -> pd.DataFrame
-from Caste_Project.handlers.document_pdf import pdf_extract_to_relational
-from Caste_Project.handlers.document_docx import extract_docx_to_relational
-from Caste_Project.handlers.document_csv import extract_csv_to_relational
+from Caste_Project.ingest.discover import build_manifest  # expected: build_manifest(root: Path) -> pd.DataFrame
+from Caste_Project.ingest.handlers.document_pdf import pdf_extract_to_relational
+from Caste_Project.ingest.handlers.document_docx import extract_docx_to_relational
+from Caste_Project.ingest.handlers.tabular_csv import extract_csv_to_relational
 
 
 def _pick_first_file(manifest: pd.DataFrame, ext: str) -> pd.Series:

@@ -1,0 +1,51 @@
+# -----------------------------
+# Local test data (do not commit)
+# -----------------------------
+data/_test_input/
+data/_test_output/
+data/_test_pdf/
+data/_test_docx/
+data/_test_csv/
+data/_dummy/
+data/dummy/
+data/tmp/
+data/_tmp/
+data/scratch/
+
+# If you keep large/raw data anywhere under data/
+data/raw/
+data/external/
+
+# Generated artifacts (optional: keep if you want versioned outputs)
+data/**/interim/
+data/**/outputs/
+data/**/reports/
+data/**/artifacts/
+
+# Parquet/arrow outputs (often large)
+*.parquet
+*.arrow
+*.feather
+
+# CSV outputs from runs (optional)
+*.csv
+
+# Logs
+*.log
+logs/
+*.out
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+
+# Python caches
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Local envs
+.venv/
+venv/
+.env
+.env.*
