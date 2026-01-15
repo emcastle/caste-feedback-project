@@ -3,44 +3,63 @@ document_pdf.py
 
 Purpose
 -------
-PDF-specific document ingestion utilities.
+PDF ingestion handler focused on extraction (not template parsing).
 
-This handler extracts page-level text from PDFs, optionally runs OCR on embedded images,
-and (optionally) parses the PDF into "entries" using marker-based segmentation.
+This module:
+1) Reads PDF page text using PyMuPDF (fitz)
+2) Detects embedded images per page
+3) Optionally OCRs embedded images per page (pytesseract)
+4) Produces two relational outputs:
+   - documents_df: 1 row per PDF (identity + metadata + doc-level errors)
+   - pages_df:     1 row per page (page order + extracted text + OCR text)
 
-Design
-------
-There are two layers:
+Key Design Decisions
+--------------------
+- Extraction-only: no marker-based entry segmentation here.
+- Preserve ordering: page_num + doc_id allow later segmentation/parsing to reconstruct
+  full-document text deterministically.
+- Stable identity: doc_id is computed as sha256 of PDF bytes so it persists across runs
+  even if the file is renamed or moved.
 
-1) Text extraction (template-agnostic):
-   - Extract page text with PyMuPDF (fitz)
-   - Detect pages containing images
-   - Optionally OCR embedded images (pytesseract)
+Downstream Usage
+----------------
+To reconstruct full document text later:
+- group pages_df by doc_id
+- sort by page_num
+- join merged_text with page delimiters
 
-2) Entry parsing (template-dependent):
-   - Segment content into entries using configurable markers (e.g., "Requestor’s Name:")
-   - If no parser is configured or detection fails, fallback to a single record per document.
+Example downstream reconstruction (conceptual):
+full_text = "\n\n".join(f"=== PAGE {p} ===\n{t}" for p, t in ordered_pages)
 
-Outputs
--------
-The primary entry point returns a records DataFrame with (at minimum):
-- record_id
+Outputs (schemas)
+-----------------
+documents_df columns:
+- doc_id
 - source_file
 - source_rel_path
 - source_ext
 - source_type
-- text
-- page_start, page_end (nullable)
-- parser_used
-- needs_ocr (nullable)
-- error (nullable)
+- num_pages
+- num_image_pages
+- extractor_used
+- error
+
+pages_df columns:
+- doc_id
+- page_num
+- has_images
+- page_text
+- ocr_text
+- merged_text
+- page_text_len
+- ocr_text_len
+- error
 """
 
 from __future__ import annotations
 
+import hashlib
 import io
-import re
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -48,51 +67,31 @@ from typing import Dict, List, Optional, Tuple
 import pandas as pd
 
 
-IMAGE_TEXT_FLAG = "[IMAGE_TEXT_HERE]"
-
-
-@dataclass(frozen=True)
-class PdfEntryMarkers:
-    """
-    Marker strings for parsing entries inside a PDF.
-    These are template dependent.
-    """
-    entry_start: str = "Requestor’s Name:"
-    response_header: str = "Response"
-    incoming_hint: str = "Incoming"
-
-
 @dataclass(frozen=True)
 class PdfOcrConfig:
     """
-    OCR configuration.
+    OCR configuration for embedded images inside PDFs.
     """
     enable_ocr: bool = True
-    sparse_text_threshold: int = 20  # if page text shorter than this and images exist, mark as needs OCR
 
 
-@dataclass(frozen=True)
-class PdfParseConfig:
+def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
     """
-    Parsing configuration.
-
-    parse_mode:
-      - "entries": attempt marker-based entry segmentation
-      - "pages": emit one record per page (merged text)
-      - "document": emit one record for whole document (merged text)
+    Compute SHA-256 for a file. Used as stable doc_id.
     """
-    parse_mode: str = "entries"
-    markers: PdfEntryMarkers = PdfEntryMarkers()
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while True:
+            b = f.read(chunk_size)
+            if not b:
+                break
+            h.update(b)
+    return h.hexdigest()
 
 
-def _new_record_id() -> str:
-    return str(uuid.uuid4())
-
-
-def extract_pdf_page_texts(pdf_path: Path) -> Dict[int, str]:
+def _extract_page_texts(pdf_path: Path) -> Dict[int, str]:
     import fitz  # PyMuPDF
 
-    pdf_path = pdf_path.resolve()
     doc = fitz.open(str(pdf_path))
     try:
         out: Dict[int, str] = {}
@@ -103,10 +102,9 @@ def extract_pdf_page_texts(pdf_path: Path) -> Dict[int, str]:
         doc.close()
 
 
-def pages_with_images(pdf_path: Path) -> Dict[int, bool]:
+def _pages_with_images(pdf_path: Path) -> Dict[int, bool]:
     import fitz  # PyMuPDF
 
-    pdf_path = pdf_path.resolve()
     doc = fitz.open(str(pdf_path))
     try:
         out: Dict[int, bool] = {}
@@ -117,19 +115,18 @@ def pages_with_images(pdf_path: Path) -> Dict[int, bool]:
         doc.close()
 
 
-def extract_pdf_image_ocr_by_page(pdf_path: Path) -> Dict[int, str]:
+def _ocr_images_by_page(pdf_path: Path) -> Dict[int, str]:
     """
-    OCR embedded images by page.
-    Returns: {page_num: ocr_text}
+    OCR embedded images in the PDF, grouped by page number.
     """
     import fitz  # PyMuPDF
     from PIL import Image
     import pytesseract
 
-    pdf_path = pdf_path.resolve()
     doc = fitz.open(str(pdf_path))
     try:
         ocr_texts: Dict[int, str] = {}
+
         for page_num, page in enumerate(doc):
             images = page.get_images(full=True)
             if not images:
@@ -146,10 +143,14 @@ def extract_pdf_image_ocr_by_page(pdf_path: Path) -> Dict[int, str]:
                 if not image_bytes:
                     continue
 
-                image = Image.open(io.BytesIO(image_bytes))
-                text = pytesseract.image_to_string(image).strip()
-                if text:
-                    parts.append(text)
+                try:
+                    image = Image.open(io.BytesIO(image_bytes))
+                    text = pytesseract.image_to_string(image).strip()
+                    if text:
+                        parts.append(text)
+                except Exception:
+                    # Skip this image only; page-level error handled separately if desired
+                    continue
 
             if parts:
                 ocr_texts[page_num] = "\n".join(parts)
@@ -159,341 +160,159 @@ def extract_pdf_image_ocr_by_page(pdf_path: Path) -> Dict[int, str]:
         doc.close()
 
 
-def merge_page_text_and_ocr(
-    page_texts: Dict[int, str],
-    ocr_texts: Dict[int, str],
-) -> Dict[int, str]:
-    """
-    Merge OCR text into page text (page-level).
-    """
-    merged: Dict[int, str] = {}
-    for p in sorted(page_texts.keys()):
-        t = (page_texts.get(p) or "").strip()
-        o = (ocr_texts.get(p) or "").strip()
-        if t and o:
-            merged[p] = t + "\n\nOCR Extracted Text:\n" + o
-        elif o and not t:
-            merged[p] = "OCR Extracted Text:\n" + o
-        else:
-            merged[p] = t
-    return merged
+def _merge_page_text_and_ocr(page_text: str, ocr_text: str) -> str:
+    t = (page_text or "").strip()
+    o = (ocr_text or "").strip()
+
+    if t and o:
+        return t + "\n\nOCR Extracted Text:\n" + o
+    if o and not t:
+        return "OCR Extracted Text:\n" + o
+    return t
 
 
-def parse_entries_from_page_texts(
-    page_texts: Dict[int, str],
-    markers: PdfEntryMarkers,
-) -> pd.DataFrame:
-    """
-    Marker-based segmentation into entries.
-
-    Returns a DataFrame:
-      - text
-      - start_page
-      - end_page
-    """
-    entries: List[dict] = []
-    current_lines: List[str] = []
-    collecting = False
-    start_page: Optional[int] = None
-
-    page_nums = sorted(page_texts.keys())
-    for page_num in page_nums:
-        lines = [ln.strip() for ln in (page_texts.get(page_num) or "").split("\n")]
-
-        for line in lines:
-            if not line:
-                continue
-
-            if markers.entry_start in line:
-                if current_lines:
-                    entries.append(
-                        {
-                            "text": "\n".join(current_lines),
-                            "start_page": start_page,
-                            "end_page": page_num,
-                        }
-                    )
-                current_lines = [line]
-                start_page = page_num
-                collecting = True
-                continue
-
-            if markers.response_header and markers.response_header in line:
-                collecting = True
-                current_lines.append("\n" + line)
-                continue
-
-            if collecting:
-                current_lines.append(line)
-
-    if current_lines:
-        last_page = page_nums[-1] if page_nums else 0
-        entries.append(
-            {"text": "\n".join(current_lines), "start_page": start_page, "end_page": last_page}
-        )
-
-    return pd.DataFrame(entries)
-
-
-def mark_entries_needing_ocr(
-    df_entries: pd.DataFrame,
-    page_texts: Dict[int, str],
-    page_has_images: Dict[int, bool],
-    markers: PdfEntryMarkers,
-    ocr_cfg: PdfOcrConfig,
-) -> pd.DataFrame:
-    """
-    Flag entries likely missing content due to image-based text.
-    Uses two signals:
-    - pages contain images AND page text is sparse
-    - entry text contains incoming_hint AND spans image pages
-    """
-    if df_entries.empty:
-        df_entries = df_entries.copy()
-        df_entries["needs_ocr"] = False
-        return df_entries
-
-    needs_list: List[bool] = []
-    updated_texts: List[str] = []
-
-    for _, row in df_entries.iterrows():
-        entry_text = row.get("text") or ""
-        sp = int(row["start_page"]) if pd.notna(row.get("start_page")) else 0
-        ep = int(row["end_page"]) if pd.notna(row.get("end_page")) else sp
-
-        needs = False
-
-        # Signal 1: sparse page text on an image page within entry range
-        for p in range(sp, ep + 1):
-            if not page_has_images.get(p, False):
-                continue
-            page_txt = (page_texts.get(p) or "").strip()
-            if len(page_txt) < ocr_cfg.sparse_text_threshold:
-                needs = True
-                break
-
-        # Signal 2: incoming hint + image pages
-        if not needs and markers.incoming_hint and markers.incoming_hint in entry_text:
-            for p in range(sp, ep + 1):
-                if page_has_images.get(p, False):
-                    needs = True
-                    break
-
-        needs_list.append(needs)
-
-        t = entry_text
-        if needs and IMAGE_TEXT_FLAG not in t:
-            t = t + "\n" + IMAGE_TEXT_FLAG
-        updated_texts.append(t)
-
-    out = df_entries.copy()
-    out["needs_ocr"] = needs_list
-    out["text"] = updated_texts
-    return out
-
-
-def merge_entry_ocr_by_page_range(
-    df_entries: pd.DataFrame,
-    ocr_texts: Dict[int, str],
-) -> pd.DataFrame:
-    """
-    If IMAGE_TEXT_FLAG is present, replace it with OCR text from pages in [start_page, end_page].
-    """
-    if df_entries.empty:
-        return df_entries
-
-    merged_texts: List[str] = []
-    for _, row in df_entries.iterrows():
-        t = row.get("text") or ""
-        sp = int(row["start_page"]) if pd.notna(row.get("start_page")) else 0
-        ep = int(row["end_page"]) if pd.notna(row.get("end_page")) else sp
-
-        relevant: List[str] = []
-        for p in range(sp, ep + 1):
-            txt = (ocr_texts.get(p) or "").strip()
-            if txt:
-                relevant.append(txt)
-
-        if IMAGE_TEXT_FLAG in t and relevant:
-            t = t.replace(IMAGE_TEXT_FLAG, "OCR Extracted Text:\n" + "\n".join(relevant))
-
-        merged_texts.append(t)
-
-    out = df_entries.copy()
-    out["text"] = merged_texts
-    return out
-
-
-def _records_from_entries(
-    df_entries: pd.DataFrame,
-    source_file: str,
-    source_rel_path: str,
-    parser_used: str,
-) -> pd.DataFrame:
-    """
-    Convert entry rows to unified records schema.
-    """
-    if df_entries.empty:
-        return pd.DataFrame(
-            [
-                {
-                    "record_id": _new_record_id(),
-                    "source_file": source_file,
-                    "source_rel_path": source_rel_path,
-                    "source_ext": ".pdf",
-                    "source_type": "pdf_document",
-                    "text": "",
-                    "page_start": None,
-                    "page_end": None,
-                    "parser_used": parser_used,
-                    "needs_ocr": None,
-                    "error": "no_entries_parsed",
-                }
-            ]
-        )
-
-    records = []
-    for _, r in df_entries.iterrows():
-        records.append(
-            {
-                "record_id": _new_record_id(),
-                "source_file": source_file,
-                "source_rel_path": source_rel_path,
-                "source_ext": ".pdf",
-                "source_type": "pdf_entry",
-                "text": r.get("text") or "",
-                "page_start": int(r["start_page"]) if pd.notna(r.get("start_page")) else None,
-                "page_end": int(r["end_page"]) if pd.notna(r.get("end_page")) else None,
-                "parser_used": parser_used,
-                "needs_ocr": bool(r.get("needs_ocr")) if "needs_ocr" in df_entries.columns else None,
-                "error": None,
-            }
-        )
-    return pd.DataFrame(records)
-
-
-def _records_from_pages(
-    merged_page_texts: Dict[int, str],
-    source_file: str,
-    source_rel_path: str,
-    parser_used: str,
-) -> pd.DataFrame:
-    records = []
-    for p in sorted(merged_page_texts.keys()):
-        records.append(
-            {
-                "record_id": _new_record_id(),
-                "source_file": source_file,
-                "source_rel_path": source_rel_path,
-                "source_ext": ".pdf",
-                "source_type": "pdf_page",
-                "text": merged_page_texts.get(p) or "",
-                "page_start": p,
-                "page_end": p,
-                "parser_used": parser_used,
-                "needs_ocr": None,
-                "error": None,
-            }
-        )
-    return pd.DataFrame(records)
-
-
-def _records_from_document(
-    merged_page_texts: Dict[int, str],
-    source_file: str,
-    source_rel_path: str,
-    parser_used: str,
-) -> pd.DataFrame:
-    full_text = "\n\n".join([merged_page_texts[p] for p in sorted(merged_page_texts.keys())]).strip()
-    return pd.DataFrame(
-        [
-            {
-                "record_id": _new_record_id(),
-                "source_file": source_file,
-                "source_rel_path": source_rel_path,
-                "source_ext": ".pdf",
-                "source_type": "pdf_document",
-                "text": full_text,
-                "page_start": 0 if merged_page_texts else None,
-                "page_end": (max(merged_page_texts.keys()) if merged_page_texts else None),
-                "parser_used": parser_used,
-                "needs_ocr": None,
-                "error": None,
-            }
-        ]
-    )
-
-
-def pdf_to_records(
+def pdf_extract_to_relational(
     pdf_path: Path,
     source_rel_path: str,
-    parse_cfg: PdfParseConfig = PdfParseConfig(),
     ocr_cfg: PdfOcrConfig = PdfOcrConfig(),
-) -> pd.DataFrame:
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Public handler function called by the orchestrator.
+    Extract a PDF into two relational tables: documents_df and pages_df.
 
     Parameters
     ----------
     pdf_path:
         Absolute path to the PDF.
     source_rel_path:
-        Path relative to raw root (stored for traceability).
-    parse_cfg:
-        Controls parse mode and markers.
+        Path relative to your raw root (for traceability).
     ocr_cfg:
-        Controls OCR behavior.
+        OCR configuration (enable/disable).
 
     Returns
     -------
-    pd.DataFrame in unified records schema.
+    (documents_df, pages_df)
     """
     pdf_path = pdf_path.resolve()
+    doc_id = sha256_file(pdf_path)
+
     source_file = pdf_path.name
+    source_ext = ".pdf"
+    source_type = "pdf_document"
+    extractor_used = "pymupdf" + ("+tesseract" if ocr_cfg.enable_ocr else "")
 
     try:
-        page_texts = extract_pdf_page_texts(pdf_path)
-        img_pages = pages_with_images(pdf_path)
+        page_texts = _extract_page_texts(pdf_path)
+        has_images = _pages_with_images(pdf_path)
 
         ocr_texts: Dict[int, str] = {}
         if ocr_cfg.enable_ocr:
-            ocr_texts = extract_pdf_image_ocr_by_page(pdf_path)
+            ocr_texts = _ocr_images_by_page(pdf_path)
 
-        merged_page_texts = merge_page_text_and_ocr(page_texts, ocr_texts)
+        pages_rows: List[dict] = []
+        for page_num in sorted(page_texts.keys()):
+            pt = page_texts.get(page_num) or ""
+            ot = ocr_texts.get(page_num) or ""
+            merged = _merge_page_text_and_ocr(pt, ot)
 
-        mode = (parse_cfg.parse_mode or "entries").lower().strip()
-        parser_used = f"pdf:{mode}"
+            pages_rows.append(
+                {
+                    "doc_id": doc_id,
+                    "page_num": page_num,
+                    "has_images": bool(has_images.get(page_num, False)),
+                    "page_text": pt,
+                    "ocr_text": ot,
+                    "merged_text": merged,
+                    "page_text_len": len(pt.strip()),
+                    "ocr_text_len": len(ot.strip()),
+                    "error": None,
+                }
+            )
 
-        if mode == "pages":
-            return _records_from_pages(merged_page_texts, source_file, source_rel_path, parser_used)
+        pages_df = pd.DataFrame(pages_rows)
 
-        if mode == "document":
-            return _records_from_document(merged_page_texts, source_file, source_rel_path, parser_used)
-
-        # mode == "entries"
-        df_entries = parse_entries_from_page_texts(page_texts, parse_cfg.markers)
-        df_entries = mark_entries_needing_ocr(df_entries, page_texts, img_pages, parse_cfg.markers, ocr_cfg)
-
-        if ocr_cfg.enable_ocr and ocr_texts:
-            df_entries = merge_entry_ocr_by_page_range(df_entries, ocr_texts)
-
-        return _records_from_entries(df_entries, source_file, source_rel_path, parser_used + ":markers")
-
-    except Exception as e:
-        return pd.DataFrame(
+        documents_df = pd.DataFrame(
             [
                 {
-                    "record_id": _new_record_id(),
+                    "doc_id": doc_id,
                     "source_file": source_file,
                     "source_rel_path": source_rel_path,
-                    "source_ext": ".pdf",
-                    "source_type": "pdf_document",
-                    "text": "",
-                    "page_start": None,
-                    "page_end": None,
-                    "parser_used": "pdf:error",
-                    "needs_ocr": None,
+                    "source_ext": source_ext,
+                    "source_type": source_type,
+                    "num_pages": int(len(page_texts)),
+                    "num_image_pages": int(sum(1 for v in has_images.values() if v)),
+                    "extractor_used": extractor_used,
+                    "error": None,
+                }
+            ]
+        )
+
+        return documents_df, pages_df
+
+    except Exception as e:
+        documents_df = pd.DataFrame(
+            [
+                {
+                    "doc_id": doc_id,
+                    "source_file": source_file,
+                    "source_rel_path": source_rel_path,
+                    "source_ext": source_ext,
+                    "source_type": source_type,
+                    "num_pages": None,
+                    "num_image_pages": None,
+                    "extractor_used": extractor_used,
                     "error": f"{type(e).__name__}: {e}",
                 }
             ]
         )
+
+        pages_df = pd.DataFrame(
+            [
+                {
+                    "doc_id": doc_id,
+                    "page_num": None,
+                    "has_images": None,
+                    "page_text": "",
+                    "ocr_text": "",
+                    "merged_text": "",
+                    "page_text_len": 0,
+                    "ocr_text_len": 0,
+                    "error": f"{type(e).__name__}: {e}",
+                }
+            ]
+        )
+
+        return documents_df, pages_df
+
+
+def build_full_text_from_pages(pages_df: pd.DataFrame, include_page_delimiters: bool = True) -> pd.DataFrame:
+    """
+    Convenience helper: derive a doc-level full_text from pages_df.
+
+    Returns a DataFrame with:
+    - doc_id
+    - full_text
+
+    Notes
+    -----
+    This is deterministic and rebuildable; do not treat it as canonical storage
+    unless you explicitly want a cached copy.
+    """
+    if pages_df.empty:
+        return pd.DataFrame(columns=["doc_id", "full_text"])
+
+    required = {"doc_id", "page_num", "merged_text"}
+    missing = required - set(pages_df.columns)
+    if missing:
+        raise ValueError(f"pages_df missing required columns: {sorted(missing)}")
+
+    rows = []
+    for doc_id, grp in pages_df.groupby("doc_id", sort=False):
+        g = grp.sort_values("page_num")
+        if include_page_delimiters:
+            parts = [f"=== PAGE {int(r.page_num)} ===\n{r.merged_text}".strip() for r in g.itertuples(index=False)]
+        else:
+            parts = [str(r.merged_text).strip() for r in g.itertuples(index=False)]
+        full_text = "\n\n".join([p for p in parts if p])
+        rows.append({"doc_id": doc_id, "full_text": full_text})
+
+    return pd.DataFrame(rows)
