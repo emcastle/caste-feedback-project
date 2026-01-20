@@ -23,6 +23,8 @@ from Caste_Project.ingest.discover import build_manifest  # expected: build_mani
 from Caste_Project.ingest.handlers.document_pdf import pdf_extract_to_relational
 from Caste_Project.ingest.handlers.document_docx import extract_docx_to_relational
 from Caste_Project.ingest.handlers.tabular_csv import extract_csv_to_relational
+from Caste_Project.ingest.handlers.tabular_excel import extract_excel_to_relational
+# from Caste_Project.ingest.handlers.tabular_parquet import extract_parquet_to_relational
 
 
 def _pick_first_file(manifest: pd.DataFrame, ext: str) -> pd.Series:
@@ -36,7 +38,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", required=True, help="Root folder to discover files under (test input)")
     ap.add_argument("--out", required=True, help="Output folder for parquet results")
-    ap.add_argument("--ext", required=True, choices=[".pdf", ".docx", ".csv"], help="Which file type to test")
+    ap.add_argument("--ext", required=True, choices=[".pdf", ".docx", ".csv", ".xlsx"], help="Which file type to test")
     args = ap.parse_args()
 
     root = Path(args.root).resolve()
@@ -93,6 +95,29 @@ def main() -> None:
         cols = ["doc_id", "row_num", "row_text", "error"]
         cols = [c for c in cols if c in rows_df.columns]
         print(rows_df[cols].head(10).to_string(index=False))
+
+    elif args.ext == ".xlsx":
+        
+        docs_df, sheets_df, rows_df = extract_excel_to_relational(abs_path, rel_path)
+
+        docs_df.to_parquet(out / "excel_documents.parquet", index=False)
+        sheets_df.to_parquet(out / "excel_sheets.parquet", index=False)
+        rows_df.to_parquet(out / "excel_rows.parquet", index=False)
+
+        print(f"Saved: {out / 'excel_documents.parquet'}")
+        print(f"Saved: {out / 'excel_sheets.parquet'}")
+        print(f"Saved: {out / 'excel_rows.parquet'}")
+
+        print("\nEXCEL quick checks:")
+        print(docs_df[["doc_id", "num_sheets", "total_rows", "error"]].to_string(index=False))
+
+        sheet_cols = ["doc_id", "sheet_name", "sheet_index", "num_rows", "num_cols", "error"]
+        sheet_cols = [c for c in sheet_cols if c in sheets_df.columns]
+        print(sheets_df[sheet_cols].head(20).to_string(index=False))
+
+        row_cols = ["doc_id", "sheet_name", "row_num", "row_text", "error"]
+        row_cols = [c for c in row_cols if c in rows_df.columns]
+        print(rows_df[row_cols].head(10).to_string(index=False))
 
     else:
         raise ValueError(f"Unsupported ext {args.ext}")
