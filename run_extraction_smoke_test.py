@@ -29,7 +29,7 @@ def _pick_first_file(manifest: pd.DataFrame, ext: str) -> pd.Series:
     m = manifest[manifest["ext"].str.lower() == ext.lower()]
     if m.empty:
         raise FileNotFoundError(f"No files with ext={ext} found in manifest.")
-    return m.sort_values(["source_rel_path"]).iloc[0]
+    return m.sort_values(["rel_path"]).iloc[0]
 
 
 def main() -> None:
@@ -46,12 +46,12 @@ def main() -> None:
     # 1) Discovery
     manifest = build_manifest(root)
     print(f"Discovered {len(manifest)} files total.")
-    print(manifest[["source_rel_path", "ext"]].head(20).to_string(index=False))
+    print(manifest[["rel_path", "ext"]].head(20).to_string(index=False))
 
     # 2) Pick one file of the requested type
     row = _pick_first_file(manifest, args.ext)
     abs_path = Path(row["abs_path"]).resolve()
-    rel_path = str(row["source_rel_path"])
+    rel_path = str(row["rel_path"])
 
     print(f"\nTesting one file:")
     print(f"  ext: {args.ext}")
