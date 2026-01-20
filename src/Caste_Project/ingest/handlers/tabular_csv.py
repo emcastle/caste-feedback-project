@@ -100,18 +100,62 @@ def _build_row_text(row: pd.Series, max_chars: int) -> str:
 
 
 def _read_csv_with_fallbacks(path: Path, cfg: CsvReadConfig) -> pd.DataFrame:
-    """
-    Robust CSV reader:
-    - allows delimiter inference using python engine if delimiter is None
-    - tries encoding fallbacks if encoding is None
-    """
+    encodings_to_try = [cfg.encoding] if cfg.encoding else ["utf-8", "utf-8-sig", "cp1252", "latin-1"]
+
+    # If delimiter not provided, try common separators
+    seps_to_try = [cfg.delimiter] if cfg.delimiter is not None else [",", "\t", "|", ";"]
+
+    last_err = None
+    for enc in encodings_to_try:
+        for sep in seps_to_try:
+            # Try C engine first
+            try:
+                read_kwargs = dict(
+                    sep=sep,
+                    engine="c",
+                    keep_default_na=cfg.keep_default_na,
+                    na_values=cfg.na_values,
+                    low_memory=cfg.low_memory,
+                )
+                return pd.read_csv(path, encoding=enc, **read_kwargs)
+            except Exception as e:
+                last_err = e
+
+            # Fallback to python engine (no low_memory)
+            try:
+                read_kwargs = dict(
+                    sep=sep,
+                    engine="python",
+                    keep_default_na=cfg.keep_default_na,
+                    na_values=cfg.na_values,
+                )
+                return pd.read_csv(path, encoding=enc, **read_kwargs)
+            except Exception as e:
+                last_err = e
+
+    raise RuntimeError(
+        f"Failed to read CSV with encodings {encodings_to_try} and seps {seps_to_try}: {last_err}"
+    )
+
+
+"""
+def _read_csv_with_fallbacks(path: Path, cfg: CsvReadConfig) -> pd.DataFrame:
+    
+    #Robust CSV reader:
+    #- allows delimiter inference using python engine if delimiter is None
+    #- tries encoding fallbacks if encoding is None
+    
+    engine = "python" if cfg.delimiter is None else "c"
+
     read_kwargs = dict(
         sep=cfg.delimiter if cfg.delimiter else None,
-        engine="python" if cfg.delimiter is None else "c",
+        engine=engine,
         keep_default_na=cfg.keep_default_na,
-        na_values=cfg.na_values,
-        low_memory=cfg.low_memory,
+        na_values=cfg.na_values
     )
+
+    if engine == "c":
+        read_kwargs["low_memory"] = cfg.low_memory
 
     if cfg.encoding:
         return pd.read_csv(path, encoding=cfg.encoding, **read_kwargs)
@@ -126,7 +170,7 @@ def _read_csv_with_fallbacks(path: Path, cfg: CsvReadConfig) -> pd.DataFrame:
             last_err = e
 
     raise RuntimeError(f"Failed to read CSV with encodings {encodings_to_try}: {last_err}")
-
+"""
 
 def extract_csv_to_relational(
     csv_path: Path,
