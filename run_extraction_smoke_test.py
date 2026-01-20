@@ -24,6 +24,8 @@ from Caste_Project.ingest.handlers.document_pdf import pdf_extract_to_relational
 from Caste_Project.ingest.handlers.document_docx import extract_docx_to_relational
 from Caste_Project.ingest.handlers.tabular_csv import extract_csv_to_relational
 from Caste_Project.ingest.handlers.tabular_excel import extract_excel_to_relational
+from Caste_Project.ingest.handlers.structured_json import extract_json_to_relational
+from Caste_Project.ingest.handlers.document_txt import extract_txt_to_relational
 # from Caste_Project.ingest.handlers.tabular_parquet import extract_parquet_to_relational
 
 
@@ -38,7 +40,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", required=True, help="Root folder to discover files under (test input)")
     ap.add_argument("--out", required=True, help="Output folder for parquet results")
-    ap.add_argument("--ext", required=True, choices=[".pdf", ".docx", ".csv", ".xlsx"], help="Which file type to test")
+    ap.add_argument("--ext", required=True, choices=[".pdf", ".docx", ".csv", ".xlsx", ".json", ".txt"], help="Which file type to test")
     args = ap.parse_args()
 
     root = Path(args.root).resolve()
@@ -118,6 +120,36 @@ def main() -> None:
         row_cols = ["doc_id", "sheet_name", "row_num", "row_text", "error"]
         row_cols = [c for c in row_cols if c in rows_df.columns]
         print(rows_df[row_cols].head(10).to_string(index=False))
+
+
+    elif args.ext == ".json":
+        docs_df, records_df = extract_json_to_relational(abs_path, rel_path)
+        docs_df.to_parquet(out / "json_documents.parquet", index=False)
+        records_df.to_parquet(out / "json_records.parquet", index=False)
+
+        print(f"Saved: {out / 'json_documents.parquet'}")
+        print(f"Saved: {out / 'json_records.parquet'}")
+
+        print("\nJSON quick checks:")
+        print(docs_df[["doc_id", "top_level_type", "num_records", "error"]].to_string(index=False))
+        cols = ["doc_id", "record_num", "record_type", "record_text", "error"]
+        cols = [c for c in cols if c in records_df.columns]
+        print(records_df[cols].head(10).to_string(index=False))
+
+    elif args.ext == ".txt":
+        docs_df, lines_df = extract_txt_to_relational(abs_path, rel_path)
+        docs_df.to_parquet(out / "txt_documents.parquet", index=False)
+        lines_df.to_parquet(out / "txt_lines.parquet", index=False)
+
+        print(f"Saved: {out / 'txt_documents.parquet'}")
+        print(f"Saved: {out / 'txt_lines.parquet'}")
+
+        print("\nTXT quick checks:")
+        print(docs_df[["doc_id", "num_lines", "error"]].to_string(index=False))
+        cols = ["doc_id", "line_num", "line_text", "error"]
+        cols = [c for c in cols if c in lines_df.columns]
+        print(lines_df[cols].head(20).to_string(index=False))
+
 
     else:
         raise ValueError(f"Unsupported ext {args.ext}")
