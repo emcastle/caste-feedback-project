@@ -33,7 +33,7 @@ def _pick_first_file(manifest: pd.DataFrame, ext: str) -> pd.Series:
     m = manifest[manifest["ext"].str.lower() == ext.lower()]
     if m.empty:
         raise FileNotFoundError(f"No files with ext={ext} found in manifest.")
-    return m.sort_values(["rel_path"]).iloc[0]
+    return m.sort_values(["rel_path"]).iloc[1]
 
 
 def main() -> None:
