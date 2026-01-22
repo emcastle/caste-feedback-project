@@ -1,3 +1,29 @@
+"""
+Segmentation handling for pdf files
+
+Logic Flow:
+1. Tier 1 = heuristic segmenter
+- takes pdf_pages.parquet output from extraction (page order preserved)
+- flattens into ordered lines (including OCR text)
+- finds repeatable boundary anchors 
+- segments into feedback entries (may be one or more per document)
+- computes the confience & flags the failure conditions
+
+
+2. Tier 2 = HF Model 
+Handles segmentation when tier one fails to find high confidence anchors 
+- 
+
+
+# Testing command example:
+conda run -n feedback python -m Caste_Project.segment.segment_pdf --in_dir data\_test_output --out_dir data\_seg_output
+
+"""
+
+
+#################################
+# Imports
+#################################
 from __future__ import annotations
 
 import json
@@ -9,6 +35,9 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import pandas as pd
 
 
+#################################
+# Class
+#################################
 @dataclass(frozen=True)
 class PdfSegmentConfig:
     """
@@ -24,6 +53,8 @@ class PdfSegmentConfig:
     Outputs:
       - entries_df: one row per segmented entry
     """
+
+    # Variables used to determine a failed segmentation
     max_pages_tier1: int = 30
     min_doc_chars_for_anchor_failure: int = 10_000
     max_orphan_head_ratio: float = 0.35
@@ -62,8 +93,14 @@ NON_BOUNDARY_SECTION_ANCHORS: List[re.Pattern] = [
     re.compile(r"^\s*Sincerely\s*,?\s*$", re.IGNORECASE),
     re.compile(r"^\s*Regards\s*,?\s*$", re.IGNORECASE),
     re.compile(r"^\s*Respectfully\s*,?\s*$", re.IGNORECASE),
+    re.compile(r"^\s*Kindly\s*,?\s*$", re.IGNORECASE),
+    re.compile(r"^\s*Very Respectfully\s*,?\s*$", re.IGNORECASE),
+    re.compile(r"^\s*Signed\s*,?\s*$", re.IGNORECASE),
 ]
 
+#################################
+# Tier 1 functions 
+#################################
 
 def _normalize_line(s: str) -> str:
     s = s.replace("\u00a0", " ")  # non-breaking space
@@ -259,6 +296,9 @@ def _detect_conflicted_anchors(anchor_counts: Dict[str, int], cfg: PdfSegmentCon
 
     return bool(has_cqas_form and has_email)
 
+#################################
+# Tier 2 functions
+#################################
 
 def _should_escalate_to_hf(
     num_pages: int,
@@ -430,13 +470,16 @@ def segment_pdf_pages_to_entries(
 
     return pd.DataFrame(out_rows)
 
-
+#################################
+# Main
+#################################
 def main_cli() -> None:
     """
     Example CLI usage:
       python -m Caste_Project.segment.segment_pdf --in_dir data/_test_output --out_dir data/_seg_out
     """
     import argparse
+
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--in_dir", required=True, help="Folder containing pdf_pages.parquet and pdf_documents.parquet")
@@ -455,8 +498,22 @@ def main_cli() -> None:
 
     entries_df = segment_pdf_pages_to_entries(pages_df, documents_df, cfg)
     entries_df.to_parquet(out_dir / "pdf_entries.parquet", index=False)
+
+    # Add human-friendly 1-based display columns (otherwise entry = 0)
+    entries_df["entry_num_1based"] = entries_df["entry_num"] + 1
+
+    # start_page/end_page can be None, so handle safely
+    entries_df["start_page_1based"] = entries_df["start_page"].apply(lambda x: int(x) + 1 if pd.notna(x) else None)
+    entries_df["end_page_1based"] = entries_df["end_page"].apply(lambda x: int(x) + 1 if pd.notna(x) else None)
+
     print(f"Saved: {out_dir / 'pdf_entries.parquet'}")
-    print(entries_df[["doc_id", "entry_num", "start_page", "end_page", "seg_method", "seg_confidence", "error"]].head(25).to_string(index=False))
+    # print(entries_df[["doc_id", "entry_num", "start_page", "end_page", "seg_method", "seg_confidence", "error"]].head(25).to_string(index=False))
+
+    # Replace with 1-based index
+    print(
+    entries_df[
+        ["doc_id", "entry_num_1based", "start_page_1based", "end_page_1based", "seg_method", "seg_confidence", "error"]
+        ].head(25).to_string(index=False))
 
 
 if __name__ == "__main__":

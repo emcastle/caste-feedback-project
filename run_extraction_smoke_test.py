@@ -35,12 +35,21 @@ from Caste_Project.ingest.handlers.presentation_pptx import (extract_pptx_to_rel
                                                              PptxReadConfig)
 # from Caste_Project.ingest.handlers.tabular_parquet import extract_parquet_to_relational
 
-
+"""
 def _pick_first_file(manifest: pd.DataFrame, ext: str) -> pd.Series:
     m = manifest[manifest["ext"].str.lower() == ext.lower()]
     if m.empty:
         raise FileNotFoundError(f"No files with ext={ext} found in manifest.")
     return m.sort_values(["rel_path"]).iloc[1]
+"""
+def _pick_files(manifest: pd.DataFrame, ext: str, limit: int | None = None) -> pd.DataFrame:
+    ext = ext.lower()
+    m = manifest[manifest["ext"].str.lower() == ext].copy()
+    if m.empty:
+        raise FileNotFoundError(f"No files with ext={ext} found in manifest.")
+    if limit is not None:
+        m = m.head(limit)
+    return m
 
 
 def main() -> None:
@@ -65,10 +74,61 @@ def main() -> None:
     print(f"Discovered {len(manifest)} files total.")
     print(manifest[["rel_path", "ext"]].head(20).to_string(index=False))
 
+    """
     # 2) Pick one file of the requested type
     row = _pick_first_file(manifest, args.ext)
     abs_path = Path(row["abs_path"]).resolve()
     rel_path = str(row["rel_path"])
+    """
+
+    # 2) Iterate through all files 
+    subset = _pick_files(manifest, args.ext, args.limit)
+
+    all_docs = []
+    all_blocks = []  # pages/rows/blocks depending on ext
+
+    for i, r in subset.reset_index(drop=True).iterrows():
+        abs_path = Path(r["abs_path"])
+        rel_path = r["rel_path"]
+
+    print("\nTesting file:")
+    print(f"  [{i+1}/{len(subset)}] ext: {r['ext']}")
+    print(f"  abs: {abs_path}")
+    print(f"  rel: {rel_path}")
+
+    if args.ext == ".pdf":
+        docs_df, pages_df = extract_pdf_to_relational(abs_path, rel_path)
+        all_docs.append(docs_df)
+        all_blocks.append(pages_df)
+
+    elif args.ext == ".docx":
+        docs_df, blocks_df = extract_docx_to_relational(abs_path, rel_path)
+        all_docs.append(docs_df)
+        all_blocks.append(blocks_df)
+
+    elif args.ext == ".csv":
+        docs_df, rows_df = extract_csv_to_relational(abs_path, rel_path)
+        all_docs.append(docs_df)
+        all_blocks.append(rows_df)
+
+    elif args.ext in (".xlsx", ".xls"):
+        docs_df, rows_df = extract_excel_to_relational(abs_path, rel_path)
+        all_docs.append(docs_df)
+        all_blocks.append(rows_df)
+
+    elif args.ext in (".json", ".json5"):
+        docs_df, rows_df = extract_json_to_relational(abs_path, rel_path)
+        all_docs.append(docs_df)
+        all_blocks.append(rows_df)
+
+    elif args.ext == ".pptx":
+        docs_df, blocks_df = extract_pptx_to_relational(abs_path, rel_path, PptxReadConfig(ocr_images=True))
+        all_docs.append(docs_df)
+        all_blocks.append(blocks_df)
+
+    else:
+        raise ValueError(f"Unsupported ext {args.ext}")
+
 
     print(f"\nTesting one file:")
     print(f"  ext: {args.ext}")
