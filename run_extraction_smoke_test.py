@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pandas as pd
 
+# Modify sys path to have folder searchable
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 # Import your discovery + handlers
@@ -26,6 +27,8 @@ from Caste_Project.ingest.handlers.tabular_csv import extract_csv_to_relational
 from Caste_Project.ingest.handlers.tabular_excel import extract_excel_to_relational
 from Caste_Project.ingest.handlers.structured_json import extract_json_to_relational
 from Caste_Project.ingest.handlers.document_txt import extract_txt_to_relational
+from Caste_Project.ingest.handlers.presentation_pptx import (extract_pptx_to_relational, 
+                                                             PptxReadConfig)
 # from Caste_Project.ingest.handlers.tabular_parquet import extract_parquet_to_relational
 
 
@@ -40,7 +43,13 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", required=True, help="Root folder to discover files under (test input)")
     ap.add_argument("--out", required=True, help="Output folder for parquet results")
-    ap.add_argument("--ext", required=True, choices=[".pdf", ".docx", ".csv", ".xlsx", ".json", ".txt"], help="Which file type to test")
+    ap.add_argument("--ext", required=True, choices=[".pdf",
+                                                      ".docx",
+                                                      ".csv",
+                                                      ".xlsx",
+                                                      ".json",
+                                                      ".txt",
+                                                      ".pptx"], help="Which file type to test")
     args = ap.parse_args()
 
     root = Path(args.root).resolve()
@@ -149,6 +158,20 @@ def main() -> None:
         cols = ["doc_id", "line_num", "line_text", "error"]
         cols = [c for c in cols if c in lines_df.columns]
         print(lines_df[cols].head(20).to_string(index=False))
+
+
+    elif args.ext == ".pptx":
+        docs_df, blocks_df = extract_pptx_to_relational(abs_path, rel_path, PptxReadConfig(ocr_images=False))
+        docs_df.to_parquet(out / "pptx_documents.parquet", index=False)
+        blocks_df.to_parquet(out / "pptx_blocks.parquet", index=False)
+        print(f"Saved: {out / 'pptx_documents.parquet'}")
+        print(f"Saved: {out / 'pptx_blocks.parquet'}")
+
+        print("\nPPTX quick checks:")
+        print(docs_df[["doc_id", "num_slides", "num_blocks", "num_images", "num_images_ocr_success", "num_images_ocr_failed", "error"]].to_string(index=False))
+        cols = ["doc_id", "slide_num", "block_num", "block_type", "has_image", "ocr_text_len", "image_content_type", "error"]
+        cols = [c for c in cols if c in blocks_df.columns]
+        print(blocks_df[cols].head(20).to_string(index=False))
 
 
     else:

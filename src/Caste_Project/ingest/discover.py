@@ -54,7 +54,8 @@ SUPPORTED_EXTS = {
     ".xls",
     ".json",
     ".json5",
-    ".par"
+    ".par",
+    ".pptx"
 }
 
 
