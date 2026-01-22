@@ -1,7 +1,11 @@
 """
 Docstring for Feedback_Caste.run_extraction_smoke_test
 
-test run commands 
+
+Use this script to test one single file from a specified extension type
+
+
+test run command examples:
 conda run -n feedback python run_extraction_smoke_test.py --root data\_test_input --out data\_test_output --ext .pdf
 conda run -n feedback python run_extraction_smoke_test.py --root data\_test_input --out data\_test_output --ext .docx
 conda run -n feedback python run_extraction_smoke_test.py --root data\_test_input --out data\_test_output --ext .csv
