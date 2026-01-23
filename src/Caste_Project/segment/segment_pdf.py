@@ -612,6 +612,7 @@ def main_cli() -> None:
       python -m Caste_Project.segment.segment_pdf --in_dir data/_test_output --out_dir data/_seg_out
     """
     import argparse
+    import hashlib
 
 
     ap = argparse.ArgumentParser()
@@ -630,16 +631,21 @@ def main_cli() -> None:
     cfg = PdfSegmentConfig(enable_local_hf=bool(args.enable_hf))
 
     entries_df = segment_pdf_pages_to_entries(pages_df, documents_df, cfg)
-    entries_df.to_parquet(out_dir / "pdf_entries.parquet", index=False)
-    entries_df = pd.DataFrame(out_rows)
+    # entries_df.to_parquet(out_dir / "pdf_entries.parquet", index=False)
 
+    # Dedupe safety net (stable hash)
     if not entries_df.empty:
-        # Drop exact duplicates by doc + start/end page + text hash
-        entries_df["entry_text_hash"] = entries_df["entry_text"].fillna("").apply(lambda s: hash(s))
-        entries_df = entries_df.drop_duplicates(
-            subset=["doc_id", "start_page", "end_page", "entry_text_hash"],
-            keep="first",
-        ).drop(columns=["entry_text_hash"])
+        entries_df["_entry_text_hash"] = entries_df["entry_text"].fillna("").apply(
+            lambda s: hashlib.sha256(s.encode("utf-8", errors="ignore")).hexdigest()
+        )
+        entries_df = (
+            entries_df.drop_duplicates(
+                subset=["doc_id", "start_page", "end_page", "_entry_text_hash"],
+                keep="first",
+            )
+            .drop(columns=["_entry_text_hash"])
+            .reset_index(drop=True)
+        ) 
 
     # Add human-friendly 1-based display columns (otherwise entry = 0)
     entries_df["entry_num_1based"] = entries_df["entry_num"] + 1
@@ -648,14 +654,15 @@ def main_cli() -> None:
     entries_df["start_page_1based"] = entries_df["start_page"].apply(lambda x: int(x) + 1 if pd.notna(x) else None)
     entries_df["end_page_1based"] = entries_df["end_page"].apply(lambda x: int(x) + 1 if pd.notna(x) else None)
 
-    print(f"Saved: {out_dir / 'pdf_entries.parquet'}")
-    # print(entries_df[["doc_id", "entry_num", "start_page", "end_page", "seg_method", "seg_confidence", "error"]].head(25).to_string(index=False))
+    # Save (cleaned)
+    entries_df.to_parquet(out_dir / "pdf_entries.parquet", index=False)
 
-    # Replace with 1-based index
+    print(f"Saved: {out_dir / 'pdf_entries.parquet'}")
     print(
-    entries_df[
-        ["doc_id", "entry_num_1based", "start_page_1based", "end_page_1based", "seg_method", "seg_confidence", "error"]
-        ].head(25).to_string(index=False))
+        entries_df[
+            ["doc_id", "entry_num_1based", "start_page_1based", "end_page_1based", "seg_method", "seg_confidence", "error"]
+        ].head(25).to_string(index=False)
+    )
 
 
 if __name__ == "__main__":
