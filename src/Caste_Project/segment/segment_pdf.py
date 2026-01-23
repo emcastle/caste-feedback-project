@@ -69,7 +69,7 @@ class PdfSegmentConfig:
     enable_local_hf: bool = False
     hf_model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
 
-
+"""
 # Repeatable, boundary-like anchors (good candidates for splitting multiple entries)
 BOUNDARY_ANCHORS: Dict[str, re.Pattern] = {
     # Standardized CQAS-ish forms
@@ -87,6 +87,40 @@ BOUNDARY_ANCHORS: Dict[str, re.Pattern] = {
     # CQAS ID (often appears near top of an entry)
     "cqas_id": re.compile(r"\bCQAS[-–—]?\s*\d{3,6}\b", re.IGNORECASE),
 }
+
+"""
+
+# Entry boundary anchors: ONLY things that can start a new entry
+ENTRY_ANCHORS: Dict[str, re.Pattern] = {
+    # CQAS / form entry starts
+    "requestor_name": re.compile(r"^\s*Requestor[’']?s\s+Name\s*:\s*", re.IGNORECASE),
+    "cqas_id": re.compile(r"\bCQAS[-–—]?\s*\d{3,6}\b", re.IGNORECASE),
+
+    # Email-like entry starts (use as start markers, not fields)
+    "original_message": re.compile(r"^\s*-{2,}\s*Original Message\s*-{2,}\s*$", re.IGNORECASE),
+    "from": re.compile(r"^\s*From\s*:\s*", re.IGNORECASE),
+    "to": re.compile(r"^\s*To\s*:\s*", re.IGNORECASE),
+    "subject": re.compile(r"^\s*Subject\s*:\s*", re.IGNORECASE),
+}
+
+# Field/section anchors: DO NOT split on these; record them for validation later
+FIELD_ANCHORS: Dict[str, re.Pattern] = {
+    "date_of_request": re.compile(r"^\s*Date\s+of\s+Request\s*:\s*", re.IGNORECASE),
+    "incoming": re.compile(r"^\s*Incoming\b", re.IGNORECASE),
+    "response": re.compile(r"^\s*Response\b", re.IGNORECASE),
+
+    # closings/signatures (examples)
+    "sincerely": re.compile(r"^\s*Sincerely\s*,?\s*$", re.IGNORECASE),
+    "regards": re.compile(r"^\s*Regards\s*,?\s*$", re.IGNORECASE),
+    "respectfully": re.compile(r"^\s*Respectfully\s*,?\s*$", re.IGNORECASE),
+}
+
+
+def _field_anchor_counts_in_text(text: str) -> Dict[str, int]:
+    counts = {}
+    for name, pat in FIELD_ANCHORS.items():
+        counts[name] = len(pat.findall(text))
+    return counts
 
 # Single-occurrence anchors that are NOT boundaries by default (section markers)
 NON_BOUNDARY_SECTION_ANCHORS: List[re.Pattern] = [
@@ -145,11 +179,45 @@ def _iter_doc_lines(pages_df: pd.DataFrame, cfg: PdfSegmentConfig) -> pd.DataFra
     out.insert(1, "pos", range(len(out)))  # stable global position
     return out
 
+def _pick_entry_strategy(anchor_counts: Dict[str, int], cfg: PdfSegmentConfig) -> Tuple[str, List[str]]:
+    """
+    Choose ONE entry segmentation strategy per document.
+    Returns: (strategy_name, entry_anchor_keys_used)
+    """
+    # counts for CQAS/form style
+    cqas_hits = {
+        "requestor_name": anchor_counts.get("requestor_name", 0),
+        "cqas_id": anchor_counts.get("cqas_id", 0),
+    }
+
+    # counts for email style
+    email_hits = {
+        "original_message": anchor_counts.get("original_message", 0),
+        "from": anchor_counts.get("from", 0),
+        "to": anchor_counts.get("to", 0),
+        "subject": anchor_counts.get("subject", 0),
+    }
+
+    # Heuristic: CQAS form wins if it repeats
+    if cqas_hits["requestor_name"] >= cfg.min_boundary_repeat:
+        return ("cqas_requestor_name", ["requestor_name"])
+    if cqas_hits["cqas_id"] >= cfg.min_boundary_repeat:
+        return ("cqas_id", ["cqas_id"])
+
+    # Email heuristic: require some repeatable “start pattern”
+    # Prefer "Original Message" if present/repeatable, else From:
+    if email_hits["original_message"] >= cfg.min_boundary_repeat:
+        return ("email_original_message", ["original_message"])
+    if email_hits["from"] >= cfg.min_boundary_repeat:
+        return ("email_from", ["from"])
+
+    # Otherwise: no safe multi-entry boundary
+    return ("fallback_single", [])
 
 def _count_anchor_hits(lines_df: pd.DataFrame) -> Dict[str, int]:
-    counts: Dict[str, int] = {k: 0 for k in BOUNDARY_ANCHORS}
+    counts: Dict[str, int] = {k: 0 for k in ENTRY_ANCHORS}
     for txt in lines_df["line_text"].tolist():
-        for name, pat in BOUNDARY_ANCHORS.items():
+        for name, pat in ENTRY_ANCHORS.items():
             if pat.search(txt):
                 counts[name] += 1
     return counts
@@ -165,11 +233,11 @@ def _pick_repeatable_boundary_anchors(anchor_counts: Dict[str, int], cfg: PdfSeg
     # treat that as "conflict" later; keep both for now.
     return repeatable
 
-
+"""
 def _find_boundary_positions(lines_df: pd.DataFrame, repeatable_keys: List[str]) -> List[int]:
-    """
-    Return 'pos' indices where a repeatable boundary anchor hits.
-    """
+    
+    # Return 'pos' indices where a repeatable boundary anchor hits.
+    
     if not repeatable_keys:
         return []
 
@@ -192,23 +260,30 @@ def _find_boundary_positions(lines_df: pd.DataFrame, repeatable_keys: List[str])
             out.append(p)
             seen.add(p)
     return out
-
+"""
 
 def _segment_by_boundaries(
     lines_df: pd.DataFrame,
     boundary_pos: List[int],
     cfg: PdfSegmentConfig,
 ) -> List[Tuple[int, int]]:
-    """
-    Return list of (start_pos, end_pos_inclusive) segments.
-    """
+    
+    # Return list of (start_pos, end_pos_inclusive) segments.
+    
     if lines_df.empty:
         return []
 
     last_pos = int(lines_df["pos"].max())
 
     # Always start at 0
-    starts = [0] + [p for p in boundary_pos if p > 0]
+    # starts = [0] + [p for p in boundary_pos if p > 0]
+
+    if not boundary_pos:
+        return[(0, last_pos)]
+    
+    starts = boundary_pos[:] # starts are anchor hits
+
+    starts[0] = 0
 
     # Remove starts that are too close together (noise)
     cleaned = []
@@ -237,6 +312,36 @@ def _segment_by_boundaries(
 
     return merged
 
+def _field_anchor_counts_in_text(text: str) -> Dict[str, int]:
+    counts = {}
+    for name, pat in FIELD_ANCHORS.items():
+        counts[name] = len(pat.findall(text))
+    return counts
+
+def _find_entry_start_positions(lines_df: pd.DataFrame, entry_anchor_keys: List[str], min_gap_lines: int = 8) -> List[int]:
+    """
+    Return pos indices where chosen entry start anchors occur.
+    De-dupe hits that are too close together (same header repeated, etc.).
+    """
+    if not entry_anchor_keys:
+        return []
+
+    pats = [ENTRY_ANCHORS[k] for k in entry_anchor_keys]
+    hits: List[int] = []
+
+    for _, r in lines_df.iterrows():
+        txt = r["line_text"]
+        if any(p.search(txt) for p in pats):
+            hits.append(int(r["pos"]))
+
+    # de-dupe by proximity window (prevents multiple starts caused by repeated headers)
+    hits = sorted(set(hits))
+    cleaned: List[int] = []
+    for p in hits:
+        if not cleaned or (p - cleaned[-1]) >= min_gap_lines:
+            cleaned.append(p)
+
+    return cleaned
 
 def _segment_confidence(
     lines_df: pd.DataFrame,
@@ -341,6 +446,9 @@ def _hf_segment_stub(lines_df: pd.DataFrame, cfg: PdfSegmentConfig) -> List[Tupl
         "Plumb in sentence-transformers based boundary detection here."
     )
 
+#################################
+# Main Function
+#################################
 
 def segment_pdf_pages_to_entries(
     pages_df: pd.DataFrame,
@@ -352,65 +460,75 @@ def segment_pdf_pages_to_entries(
 
     Returns entries_df columns:
       doc_id, entry_num, start_page, end_page, start_pos, end_pos, entry_text,
-      seg_method, seg_confidence, flags_json, error
+      seg_method, seg_confidence, flags_json, field_anchor_counts_json, error
     """
     out_rows: List[Dict] = []
 
     for doc_id, doc_pages in pages_df.groupby("doc_id"):
         doc_meta = documents_df.loc[documents_df["doc_id"] == doc_id].head(1)
-        num_pages = int(doc_meta["num_pages"].iloc[0]) if (not doc_meta.empty and pd.notna(doc_meta["num_pages"].iloc[0])) else int(doc_pages["page_num"].max()) + 1
+        num_pages = (
+            int(doc_meta["num_pages"].iloc[0])
+            if (not doc_meta.empty and pd.notna(doc_meta["num_pages"].iloc[0]))
+            else int(doc_pages["page_num"].max()) + 1
+        )
 
         lines_df = _iter_doc_lines(doc_pages, cfg)
         doc_text = "\n".join(lines_df["line_text"].tolist()) if not lines_df.empty else ""
         doc_chars = len(doc_text)
 
-        anchor_counts = _count_anchor_hits(lines_df) if not lines_df.empty else {k: 0 for k in BOUNDARY_ANCHORS}
-        repeatable_keys = _pick_repeatable_boundary_anchors(anchor_counts, cfg)
-        conflicted = _detect_conflicted_anchors(anchor_counts, cfg)
+        # Count ENTRY anchors only (make sure _count_anchor_hits uses ENTRY_ANCHORS now)
+        anchor_counts = _count_anchor_hits(lines_df) if not lines_df.empty else {k: 0 for k in ENTRY_ANCHORS}
 
-        boundary_pos = _find_boundary_positions(lines_df, repeatable_keys) if not lines_df.empty else []
+        # Choose ONE strategy per doc
+        strategy_name, entry_keys = _pick_entry_strategy(anchor_counts, cfg)
+
+        # Find entry start positions using ONLY chosen entry anchors
+        boundary_pos = _find_entry_start_positions(lines_df, entry_keys) if (not lines_df.empty and entry_keys) else []
+
+        # If we have starts, segment; else fallback to single
         segments = _segment_by_boundaries(lines_df, boundary_pos, cfg) if not lines_df.empty else []
 
-        # orphan head ratio (for escalation and flags)
+        # orphan head ratio (text before first start if first start isn't 0)
         if segments and segments[0][0] > 0 and not lines_df.empty:
             orphan_head_chars = len("\n".join(lines_df.loc[lines_df["pos"] < segments[0][0], "line_text"].tolist()))
             orphan_head_ratio = orphan_head_chars / max(1, doc_chars)
         else:
             orphan_head_ratio = 0.0
 
-        confidence = _segment_confidence(lines_df, segments, repeatable_keys)
+        # Confidence should be computed using entry_keys (not old repeatable_keys)
+        confidence = _segment_confidence(lines_df, segments, entry_keys)
 
         flags = {
             "num_pages": num_pages,
             "doc_chars": doc_chars,
-            "repeatable_anchors": repeatable_keys,
-            "anchor_counts": anchor_counts,
-            "conflicted_anchors": conflicted,
+            "entry_strategy": strategy_name,
+            "entry_anchors_used": entry_keys,
+            "entry_anchor_counts": anchor_counts,
             "orphan_head_ratio": orphan_head_ratio,
         }
 
         try:
+            # Tier-2 routing (optional). For now you can leave hf disabled.
             if _should_escalate_to_hf(
                 num_pages=num_pages,
                 doc_chars=doc_chars,
-                repeatable_keys=repeatable_keys,
+                repeatable_keys=entry_keys,          # reuse param name, but feed entry_keys
                 orphan_head_ratio=orphan_head_ratio,
-                conflicted=conflicted,
+                conflicted=False,                   # conflicted logic removed by single-strategy pick
                 confidence=confidence,
                 cfg=cfg,
             ):
                 segments = _hf_segment_stub(lines_df, cfg)
                 seg_method = "tier2_local_hf"
             else:
-                seg_method = "tier1_anchors"
+                seg_method = f"tier1_{strategy_name}"
 
+            # Fallback behavior
             if not segments and not lines_df.empty:
-                # fallback: single entry covering all
                 segments = [(0, int(lines_df["pos"].max()))]
                 seg_method = "tier1_single"
 
             if not segments and lines_df.empty:
-                # no text at all
                 out_rows.append(
                     {
                         "doc_id": doc_id,
@@ -423,6 +541,7 @@ def segment_pdf_pages_to_entries(
                         "seg_method": "tier1_empty",
                         "seg_confidence": 0.0,
                         "flags_json": json.dumps(flags, ensure_ascii=False),
+                        "field_anchor_counts_json": json.dumps({}, ensure_ascii=False),
                         "error": None,
                     }
                 )
@@ -434,6 +553,8 @@ def segment_pdf_pages_to_entries(
 
                 start_page = int(seg_lines["page_num"].min()) if not seg_lines.empty else None
                 end_page = int(seg_lines["page_num"].max()) if not seg_lines.empty else None
+
+                field_counts = _field_anchor_counts_in_text(entry_text)
 
                 out_rows.append(
                     {
@@ -447,6 +568,7 @@ def segment_pdf_pages_to_entries(
                         "seg_method": seg_method,
                         "seg_confidence": float(confidence),
                         "flags_json": json.dumps(flags, ensure_ascii=False),
+                        "field_anchor_counts_json": json.dumps(field_counts, ensure_ascii=False),
                         "error": None,
                     }
                 )
@@ -464,14 +586,25 @@ def segment_pdf_pages_to_entries(
                     "seg_method": "error",
                     "seg_confidence": float(confidence),
                     "flags_json": json.dumps(flags, ensure_ascii=False),
+                    "field_anchor_counts_json": json.dumps({}, ensure_ascii=False),
                     "error": f"{type(ex).__name__}: {ex}",
                 }
             )
 
-    return pd.DataFrame(out_rows)
+    entries_df = pd.DataFrame(out_rows)
+
+    # Optional final dedupe safety net (recommended)
+    if not entries_df.empty:
+        entries_df["_entry_text_hash"] = entries_df["entry_text"].fillna("").apply(lambda s: hash(s))
+        entries_df = entries_df.drop_duplicates(
+            subset=["doc_id", "start_page", "end_page", "_entry_text_hash"],
+            keep="first",
+        ).drop(columns=["_entry_text_hash"])
+
+    return entries_df
 
 #################################
-# Main
+# Main CLI
 #################################
 def main_cli() -> None:
     """
@@ -498,6 +631,15 @@ def main_cli() -> None:
 
     entries_df = segment_pdf_pages_to_entries(pages_df, documents_df, cfg)
     entries_df.to_parquet(out_dir / "pdf_entries.parquet", index=False)
+    entries_df = pd.DataFrame(out_rows)
+
+    if not entries_df.empty:
+        # Drop exact duplicates by doc + start/end page + text hash
+        entries_df["entry_text_hash"] = entries_df["entry_text"].fillna("").apply(lambda s: hash(s))
+        entries_df = entries_df.drop_duplicates(
+            subset=["doc_id", "start_page", "end_page", "entry_text_hash"],
+            keep="first",
+        ).drop(columns=["entry_text_hash"])
 
     # Add human-friendly 1-based display columns (otherwise entry = 0)
     entries_df["entry_num_1based"] = entries_df["entry_num"] + 1
