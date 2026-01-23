@@ -647,6 +647,29 @@ def main_cli() -> None:
             .reset_index(drop=True)
         ) 
 
+    # Sanity check 
+    bad_docs = []
+    for doc_id, g in entries_df.groupby("doc_id"):
+        nums = sorted(g["entry_num"].dropna().astype(int).unique().tolist())
+        if nums != list(range(len(nums))):
+            bad_docs.append((doc_id, nums[:30], len(nums)))
+    
+    if bad_docs:
+        print("WARNING: non-contiguous entry_num detected:")
+        for doc_id, sample_nums, n in bad_docs[:10]:
+            print(f" {doc_id}: n_unique={n}, nums_head={sample_nums}")
+
+    # Deterministic ordering 
+    if not entries_df.empty:
+        entries_df = entries_df.sort_values(["doc_id", "start_page", "start_pos"]).reset_index(drop=True)
+        entries_df["entry_num"] = entries_df.groupby("doc_id").cumcount()
+        #entries_df = (
+        #    entries_df.sort_values(["doc_id", "start_page", "start_pos"])
+        #    .groupby("doc_id", group_keys=False)
+        #    .apply(lambda g: g.assign(entry_num=range(len(g))))
+        #    .reset_index(drop=True)
+        #)
+
     # Add human-friendly 1-based display columns (otherwise entry = 0)
     entries_df["entry_num_1based"] = entries_df["entry_num"] + 1
 
