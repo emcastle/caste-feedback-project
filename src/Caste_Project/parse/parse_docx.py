@@ -14,51 +14,57 @@ import pandas as pd
 # -----------------------------
 @dataclass(frozen=True)
 class DocxParseConfig:
-    """
-    Parses segmented DOCX entries into structured fields.
+    max_header_lines: int = 80
+    max_tail_lines: int = 60
+    prefer_filename_metadata: bool = True
 
-    Input:
-      - docx_entries.parquet produced by segment_docx.py
-        must have: doc_id, entry_num, entry_text
-        optionally: start_block, end_block, seg_method, seg_confidence, error
-
-    Output:
-      - docx_entry_fields.parquet (wide): one row per entry
-      - docx_entry_fields_long.parquet (long): one row per (entry, field)
-    """
-    max_header_lines: int = 60
+    # output caps
     max_subject_chars: int = 600
-    max_name_chars: int = 400
+    max_name_chars: int = 300
+    max_receiver_chars: int = 600
     max_date_chars: int = 160
-
-    prefer_incoming_section: bool = True
-    trim_signature_tail: bool = True
 
 
 # -----------------------------
-# Regex anchors
+# Patterns
 # -----------------------------
 RE_CQAS = re.compile(r"\bCQAS[-–—]?\s*(\d{3,10})\b", re.IGNORECASE)
 
-RE_FROM = re.compile(r"^\s*From\s*:\s*(.+?)\s*$", re.IGNORECASE)
-RE_TO = re.compile(r"^\s*To\s*:\s*(.+?)\s*$", re.IGNORECASE)
-RE_SUBJECT = re.compile(r"^\s*Subject\s*:\s*(.+?)\s*$", re.IGNORECASE)
-RE_DATE = re.compile(r"^\s*Date\s*:\s*(.+?)\s*$", re.IGNORECASE)
+# date patterns inside text (no "Date:" required)
+RE_DATE_TEXT = re.compile(
+    r"\b("
+    r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|"
+    r"Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},?\s+\d{4}"
+    r"|"
+    r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}"
+    r")\b",
+    re.IGNORECASE,
+)
 
-# CQAS-style headers (seen in some DOCX exports)
-RE_REQUESTOR = re.compile(r"^\s*Requestor[’']?s\s+Name\s*:\s*(.+?)\s*$", re.IGNORECASE)
-RE_DATE_OF_REQUEST = re.compile(r"^\s*Date\s+of\s+Request\s*:\s*(.+?)\s*$", re.IGNORECASE)
+# date patterns inside filename like "10-22" or "10-22-2021" or "10222021"
+RE_DATE_FILE = re.compile(
+    r"\b("
+    r"\d{1,2}[-_]\d{1,2}([-_]\d{2,4})?"
+    r"|"
+    r"\d{8}"
+    r")\b"
+)
 
-# Section markers
-RE_INCOMING = re.compile(r"^\s*Incoming\b\s*:?$", re.IGNORECASE)
-RE_RESPONSE = re.compile(r"^\s*Response\b\s*:?$", re.IGNORECASE)
-RE_RESPONSE_FOLLOWUP = re.compile(r"^\s*Response\s+Follow[- ]?Up\b\s*:?$", re.IGNORECASE)
+# “Dear …” suggests letter format
+RE_DEAR = re.compile(r"^\s*Dear\b", re.IGNORECASE)
 
-# Signature-ish closings (optional trim)
-RE_SIGNATURE_LINE = re.compile(
+# closings suggest signature starts near the bottom
+RE_CLOSING = re.compile(
     r"^\s*(Sincerely|Regards|Respectfully|Very Respectfully|Thank you|Thanks)\b[, ]*\s*$",
     re.IGNORECASE,
 )
+
+# crude “name-ish” line detector for signatures (not perfect, but works well in practice)
+RE_NAMEISH = re.compile(r"^[A-Z][A-Za-z.\-']+(?:\s+[A-Z][A-Za-z.\-']+){0,4}$")
+
+# receiver/address block heuristics
+RE_HAS_ZIP = re.compile(r"\b\d{5}(-\d{4})?\b")
+RE_HAS_STATE_ZIP = re.compile(r"\b[A-Z]{2}\s+\d{5}(-\d{4})?\b")
 
 
 # -----------------------------
@@ -69,112 +75,135 @@ def _split_lines(text: str) -> List[str]:
         return []
     return [ln.strip() for ln in text.splitlines()]
 
-def _first_match(lines: List[str], pat: re.Pattern, max_lines: int) -> Optional[str]:
-    for ln in lines[:max_lines]:
-        m = pat.match(ln)
-        if m:
-            return (m.group(1) or "").strip()
-    return None
-
 def _all_cqas_ids(text: str) -> List[str]:
     out = []
     for m in RE_CQAS.finditer(text or ""):
         num = (m.group(1) or "").strip()
         if num:
             out.append(f"CQAS-{num}")
-    seen = set()
-    deduped = []
+    # dedupe preserve order
+    seen, deduped = set(), []
     for x in out:
         if x not in seen:
             seen.add(x)
             deduped.append(x)
     return deduped
 
-def _find_section_span(lines: List[str], start_pat: re.Pattern, end_pat: re.Pattern) -> Optional[Tuple[int, int]]:
-    start_idx = None
-    for i, ln in enumerate(lines):
-        if start_pat.match(ln):
-            start_idx = i
-            break
-    if start_idx is None:
-        return None
+def _find_first_date_in_text(lines: List[str], max_lines: int) -> Optional[str]:
+    for ln in lines[:max_lines]:
+        m = RE_DATE_TEXT.search(ln)
+        if m:
+            return m.group(1).strip()
+    return None
 
-    end_idx = None
-    for j in range(start_idx + 1, len(lines)):
-        if end_pat.match(lines[j]):
-            end_idx = j
-            break
+def _parse_filename_metadata(source_file: Optional[str]) -> Dict[str, Optional[str]]:
+    """
+    Your observed pattern:
+      "Greg Robinson - ASAN CENSUS FEEDBACK Group Quarters Final 10-22.docx"
+    Heuristic:
+      - sender: first token before first " - "
+      - date: last date-like token anywhere in filename
+      - subject: middle chunk between sender and date-ish tail
+    """
+    meta = {"sender": None, "subject": None, "date": None}
+    if not source_file:
+        return meta
 
-    content_start = start_idx + 1
-    content_end = (end_idx - 1) if end_idx is not None else (len(lines) - 1)
+    stem = Path(source_file).stem
 
-    if content_end < content_start:
-        return None
-    return (content_start, content_end)
+    # date candidate from filename
+    date_match = None
+    for m in RE_DATE_FILE.finditer(stem):
+        date_match = m.group(1)
+    if date_match:
+        meta["date"] = date_match
 
-def _strip_leading_headers(lines: List[str], cfg: DocxParseConfig) -> Tuple[List[str], Dict[str, Optional[str]]]:
-    fields: Dict[str, Optional[str]] = {
-        "from": None,
-        "to": None,
-        "subject": None,
-        "date": None,
-        "requestor_name": None,
-        "date_of_request": None,
-    }
+    # split on " - " (your naming convention)
+    parts = [p.strip() for p in stem.split(" - ") if p.strip()]
+    if parts:
+        meta["sender"] = parts[0][:300]
 
-    fields["from"] = _first_match(lines, RE_FROM, cfg.max_header_lines)
-    fields["to"] = _first_match(lines, RE_TO, cfg.max_header_lines)
-    fields["subject"] = _first_match(lines, RE_SUBJECT, cfg.max_header_lines)
-    fields["date"] = _first_match(lines, RE_DATE, cfg.max_header_lines)
+    # subject from remaining text (remove sender and remove date-ish tail)
+    remainder = stem
+    if meta["sender"] and remainder.startswith(meta["sender"]):
+        remainder = remainder[len(meta["sender"]):].lstrip(" -_")
+    if meta["date"]:
+        remainder = remainder.replace(meta["date"], "").strip(" -_")
 
-    fields["requestor_name"] = _first_match(lines, RE_REQUESTOR, cfg.max_header_lines)
-    fields["date_of_request"] = _first_match(lines, RE_DATE_OF_REQUEST, cfg.max_header_lines)
+    # clean “double spaces”
+    remainder = re.sub(r"\s{2,}", " ", remainder).strip()
+    meta["subject"] = remainder[:600] if remainder else None
 
-    def headerish(ln: str) -> bool:
+    return meta
+
+def _extract_receiver_block(lines: List[str], cfg: DocxParseConfig) -> Optional[str]:
+    """
+    Receiver often appears as an address block at top of letter:
+      line1: agency/person
+      line2: street / office
+      line3: city state zip
+    We grab until first blank line, but only if it looks address-like.
+    """
+    head = lines[: cfg.max_header_lines]
+    block: List[str] = []
+    for ln in head:
         if not ln:
-            return True
-        return bool(
-            RE_FROM.match(ln)
-            or RE_TO.match(ln)
-            or RE_SUBJECT.match(ln)
-            or RE_DATE.match(ln)
-            or RE_REQUESTOR.match(ln)
-            or RE_DATE_OF_REQUEST.match(ln)
-        )
+            break
+        block.append(ln)
 
-    k = 0
-    while k < len(lines) and k < cfg.max_header_lines and headerish(lines[k]):
-        k += 1
+    if not block:
+        return None
 
-    return lines[k:], fields
+    # must look like an address-ish block to count
+    joined = " ".join(block)
+    if RE_HAS_ZIP.search(joined) or RE_HAS_STATE_ZIP.search(joined) or len(block) >= 3:
+        # don’t return huge nonsense blocks
+        return "\n".join(block[:10]).strip()[: cfg.max_receiver_chars]
+    return None
 
-def _trim_signature_tail(lines: List[str]) -> List[str]:
-    if not lines:
-        return lines
-    last_sig = None
-    for i, ln in enumerate(lines):
-        if RE_SIGNATURE_LINE.match(ln):
-            last_sig = i
-    if last_sig is None:
-        return lines
-    if last_sig >= max(0, len(lines) - 30):
-        return lines[:last_sig]
-    return lines
+def _extract_sender_from_signature(lines: List[str], cfg: DocxParseConfig) -> Optional[str]:
+    """
+    Look near the end:
+      find closing phrase, then search next few lines for a name-ish line.
+    Fallback: scan last tail lines for a name-ish line.
+    """
+    tail = lines[-cfg.max_tail_lines:] if len(lines) > cfg.max_tail_lines else lines[:]
 
-def _classify_entry(lines: List[str]) -> str:
-    has_incoming = any(RE_INCOMING.match(ln) for ln in lines)
-    has_response = any(RE_RESPONSE.match(ln) for ln in lines)
-    has_followup = any(RE_RESPONSE_FOLLOWUP.match(ln) for ln in lines)
+    # if closing exists, prefer name soon after
+    for i, ln in enumerate(tail):
+        if RE_CLOSING.match(ln):
+            for j in range(i + 1, min(i + 8, len(tail))):
+                cand = tail[j].strip()
+                if RE_NAMEISH.match(cand):
+                    return cand[: cfg.max_name_chars]
+            break
 
-    if has_followup and not has_incoming:
-        return "response_followup"
-    if has_response and not has_incoming:
-        return "response_only"
-    if has_incoming and has_response:
-        return "incoming_plus_response"
-    if has_incoming:
-        return "incoming_only"
-    return "unknown"
+    # fallback: last name-ish line in tail
+    for ln in reversed(tail):
+        cand = ln.strip()
+        if RE_NAMEISH.match(cand):
+            return cand[: cfg.max_name_chars]
+
+    return None
+
+def _classify_docx_entry(lines: List[str]) -> str:
+    """
+    DOCX letters usually:
+      - have address block + date near top
+      - have Dear ... and closing
+    """
+    head = lines[:30]
+    tail = lines[-40:] if len(lines) > 40 else lines
+
+    has_dear = any(RE_DEAR.match(ln) for ln in head)
+    has_closing = any(RE_CLOSING.match(ln) for ln in tail)
+
+    if has_dear or has_closing:
+        return "letter"
+    # if it looks like an email (rare in your 3)
+    if any(ln.lower().startswith(("from:", "to:", "subject:", "date:")) for ln in head):
+        return "email_like"
+    return "memo_or_note"
 
 
 # -----------------------------
@@ -182,6 +211,7 @@ def _classify_entry(lines: List[str]) -> str:
 # -----------------------------
 def parse_docx_entries_to_fields(
     entries_df: pd.DataFrame,
+    documents_df: Optional[pd.DataFrame] = None,
     cfg: DocxParseConfig = DocxParseConfig(),
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     required = {"doc_id", "entry_num", "entry_text"}
@@ -189,68 +219,79 @@ def parse_docx_entries_to_fields(
     if missing:
         raise ValueError(f"entries_df missing required cols: {sorted(missing)}")
 
+    df = entries_df.copy()
+
+    # Bring in filename metadata (critical for your observed pattern)
+    if documents_df is not None and "source_file" in documents_df.columns:
+        df = df.merge(
+            documents_df[["doc_id", "source_file", "source_rel_path"]].drop_duplicates("doc_id"),
+            on="doc_id",
+            how="left",
+        )
+    else:
+        if "source_file" not in df.columns:
+            df["source_file"] = None
+        if "source_rel_path" not in df.columns:
+            df["source_rel_path"] = None
+
     wide_rows: List[Dict] = []
     long_rows: List[Dict] = []
 
-    for _, r in entries_df.iterrows():
+    for _, r in df.iterrows():
         doc_id = r["doc_id"]
         entry_num = int(r["entry_num"]) if pd.notna(r["entry_num"]) else 0
         entry_text = r.get("entry_text") or ""
+        source_file = r.get("source_file")
 
-        lines_all = _split_lines(entry_text)
+        lines = _split_lines(entry_text)
 
+        # CQAS (may be absent in your DOCX letters)
         cqas_ids = _all_cqas_ids(entry_text)
         cqas_id = cqas_ids[0] if cqas_ids else None
 
-        body_lines, header_fields = _strip_leading_headers(lines_all, cfg)
+        # filename-derived
+        file_meta = _parse_filename_metadata(source_file) if cfg.prefer_filename_metadata else {"sender": None, "subject": None, "date": None}
 
-        parsed_date = header_fields.get("date_of_request") or header_fields.get("date")
+        # content-derived
+        date_text = _find_first_date_in_text(lines, max_lines=25)
+        receiver_block = _extract_receiver_block(lines, cfg)
+        sender_sig = _extract_sender_from_signature(lines, cfg)
 
-        feedback_text = ""
-        if cfg.prefer_incoming_section:
-            span = _find_section_span(lines_all, RE_INCOMING, RE_RESPONSE)
-            if span:
-                s, e = span
-                feedback_lines = lines_all[s : e + 1]
-                if cfg.trim_signature_tail:
-                    feedback_lines = _trim_signature_tail(feedback_lines)
-                feedback_text = "\n".join([ln for ln in feedback_lines if ln.strip()]).strip()
+        # choose best values
+        sender = sender_sig or file_meta.get("sender")
+        subject = file_meta.get("subject")
+        date = date_text or file_meta.get("date")
 
-        if not feedback_text:
-            cleaned = body_lines
-            if cfg.trim_signature_tail:
-                cleaned = _trim_signature_tail(cleaned)
-            feedback_text = "\n".join([ln for ln in cleaned if ln.strip()]).strip()
+        # entry type
+        entry_type = _classify_docx_entry(lines)
 
-        entry_type = _classify_entry(lines_all)
+        # feedback_text: for letters just keep whole entry (you can refine later)
+        feedback_text = entry_text.strip()
 
-        sender = header_fields.get("from") or header_fields.get("requestor_name")
-        receiver = header_fields.get("to")
-        subject = header_fields.get("subject")
-        if subject:
-            subject = subject[: cfg.max_subject_chars]
+        # cap strings
         if sender:
             sender = sender[: cfg.max_name_chars]
-        if receiver:
-            receiver = receiver[: cfg.max_name_chars]
-        if parsed_date:
-            parsed_date = parsed_date[: cfg.max_date_chars]
+        if receiver_block:
+            receiver_block = receiver_block[: cfg.max_receiver_chars]
+        if subject:
+            subject = subject[: cfg.max_subject_chars]
+        if date:
+            date = date[: cfg.max_date_chars]
 
         wide = {
             "doc_id": doc_id,
             "entry_num": entry_num,
-            "start_block": r.get("start_block"),
-            "end_block": r.get("end_block"),
-            "seg_method": r.get("seg_method"),
-            "seg_confidence": r.get("seg_confidence"),
+            "source_file": source_file,
+            "source_rel_path": r.get("source_rel_path"),
+
             "entry_type": entry_type,
 
             "cqas_id": cqas_id,
             "cqas_ids_json": json.dumps(cqas_ids, ensure_ascii=False),
 
             "sender": sender,
-            "receiver": receiver,
-            "date": parsed_date,
+            "receiver": receiver_block,
+            "date": date,
             "subject": subject,
 
             "feedback_text": feedback_text,
@@ -261,20 +302,15 @@ def parse_docx_entries_to_fields(
 
         def emit(field_name: str, field_value: Optional[str]) -> None:
             long_rows.append(
-                {
-                    "doc_id": doc_id,
-                    "entry_num": entry_num,
-                    "field_name": field_name,
-                    "field_value": field_value,
-                }
+                {"doc_id": doc_id, "entry_num": entry_num, "field_name": field_name, "field_value": field_value}
             )
 
+        emit("entry_type", entry_type)
         emit("cqas_id", cqas_id)
         emit("sender", sender)
-        emit("receiver", receiver)
-        emit("date", parsed_date)
+        emit("receiver", receiver_block)
+        emit("date", date)
         emit("subject", subject)
-        emit("entry_type", entry_type)
         emit("feedback_text", feedback_text)
 
     wide_df = pd.DataFrame(wide_rows)
@@ -294,21 +330,20 @@ def parse_docx_entries_to_fields(
 def main_cli() -> None:
     """
     Usage:
-      conda run -n feedback python -m Caste_Project.parse.parse_docx --in_dir data\\_seg_output --out_dir data\\_parse_output
+      conda run -n feedback python -m Caste_Project.parse.parse_docx --in_dir data\\_seg_output --docs_dir data\\_test_output --out_dir data\\_parse_output
 
     Expects:
       in_dir/docx_entries.parquet
-
-    Writes:
-      out_dir/docx_entry_fields.parquet
-      out_dir/docx_entry_fields_long.parquet
+      docs_dir/docx_documents.parquet   (to get source_file)
     """
     import argparse
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--in_dir", required=True)
     ap.add_argument("--out_dir", required=True)
-    ap.add_argument("--entries_name", default="docx_entries.parquet", help="Filename of segmented DOCX entries parquet")
+    ap.add_argument("--entries_name", default="docx_entries.parquet")
+    ap.add_argument("--docs_dir", required=False, help="Folder containing docx_documents.parquet (recommended)")
+    ap.add_argument("--documents_name", default="docx_documents.parquet")
     args = ap.parse_args()
 
     in_dir = Path(args.in_dir)
@@ -317,11 +352,17 @@ def main_cli() -> None:
 
     entries_path = in_dir / args.entries_name
     if not entries_path.exists():
-        raise FileNotFoundError(f"Missing {entries_path}. If your segmenter wrote a different name, pass --entries_name")
+        raise FileNotFoundError(f"Missing {entries_path}. Pass --entries_name if different.")
 
     entries_df = pd.read_parquet(entries_path)
 
-    wide_df, long_df = parse_docx_entries_to_fields(entries_df, DocxParseConfig())
+    documents_df = None
+    if args.docs_dir:
+        docs_path = Path(args.docs_dir) / args.documents_name
+        if docs_path.exists():
+            documents_df = pd.read_parquet(docs_path)
+
+    wide_df, long_df = parse_docx_entries_to_fields(entries_df, documents_df, DocxParseConfig())
 
     wide_df.to_parquet(out_dir / "docx_entry_fields.parquet", index=False)
     long_df.to_parquet(out_dir / "docx_entry_fields_long.parquet", index=False)
@@ -329,7 +370,7 @@ def main_cli() -> None:
     print(f"Saved: {out_dir / 'docx_entry_fields.parquet'}")
     print(f"Saved: {out_dir / 'docx_entry_fields_long.parquet'}")
 
-    cols = ["doc_id", "entry_num", "entry_type", "cqas_id", "sender", "receiver", "date", "subject"]
+    cols = ["doc_id", "entry_num", "entry_type", "sender", "date", "subject"]
     cols = [c for c in cols if c in wide_df.columns]
     print("\nParse quick checks (head):")
     print(wide_df[cols].head(25).to_string(index=False))
