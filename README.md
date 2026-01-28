@@ -61,4 +61,58 @@ conda activate feedback
 python script_name.py
 ```
 
+---
+
+## FILE ORGANIZATION
+
+caste-feedback-project/
+├─ pyproject.toml
+├─ environment.yml
+├─ README.md
+├─ run_extraction_smoke_test.py
+├─ run_conda.bat
+├─ sanity_check.py
+├─ data/
+│  ├─ _test_input/
+│  │  ├─ pdf/
+│  │  ├─ docx/
+│  │  ├─ csv/
+│  │  ├─ pptx/
+│  │  └─ json/
+│  ├─ _test_output/          # ingestion outputs (parquet)
+│  └─ _seg_output/           # segmentation outputs (parquet)
+├─ notebooks/
+└─ src/
+   └─ Caste_Project/
+      ├─ __init__.py
+      ├─ ingest/
+      │  ├─ __init__.py
+      │  ├─ discover.py
+      │  └─ handlers/
+      │     ├─ __init__.py
+      │     ├─ document_pdf.py
+      │     ├─ document_docx.py
+      │     ├─ presentation_pptx.py
+      │     ├─ tabular_csv.py
+      │     ├─ tabular_excel.py
+      │     ├─ structured_json.py
+      │     └─ document_txt.py        # even if no txt exists now 
+      ├─ segment/
+      │  ├─ __init__.py
+      │  ├─ segment_pdf.py
+      │  ├─ segment_docx.py
+      │  ├─ segment_json.py
+      │  ├─ segment_csv.py
+      │  ├─ segment_excel.py
+      │  └─ segment_pptx.py
+      ├─ parse/                       # Work In Progess
+      │  ├─ __init__.py
+      │  └─ (future: parse_pdf.py, parse_docx.py, etc.)
+      └─ utils/                    
+         ├─ __init__.py
+         └─ text.py
+
+
+
+
 
