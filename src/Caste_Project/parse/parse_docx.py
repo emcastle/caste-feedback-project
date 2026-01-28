@@ -4,7 +4,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Sequence
 
 import pandas as pd
 
@@ -95,15 +95,33 @@ def _all_cqas_ids(text: str) -> List[str]:
             deduped.append(x)
     return deduped
 
-def _find_first_date_in_text(text: str) -> str | None:
-    if not text:
+def _coerce_text(text) -> str:
+    # If docx parser passes a list of paragraphs/lines, join into one string
+    if text is None:
+        return ""
+    if isinstance(text, str):
+        return text
+    if isinstance(text, (list, tuple)):
+        return "\n".join(str(x) for x in text if x is not None)
+    return str(text)
+
+def _find_first_date_in_text(text, max_lines: int = 60) -> str | None:
+    """
+    Return the first date-like string found near the top of the text.
+    Accepts either a string or list/tuple of strings.
+    """
+    text = _coerce_text(text)
+    if not text.strip():
         return None
 
-    m = RE_DATE_TEXT.search(text)
+    lines = text.splitlines()
+    scan_text = "\n".join(lines[:max_lines])
+
+    m = RE_DATE_TEXT.search(scan_text)
     if m:
         return m.group(0)
 
-    m = RE_MONTH_YEAR.search(text)
+    m = RE_MONTH_YEAR.search(scan_text)
     if m:
         return m.group(0)
 
