@@ -121,6 +121,9 @@ caste-feedback-project/
       ├─ parse/                       # Work In Progess
       │  ├─ __init__.py
       │  └─ (future: parse_pdf.py, parse_docx.py, etc.)
+      ├─ nlp/
+      |  ├─ __init__.py
+      |  └─ (future: polarity, sentiment analysis, actionable summary, temporal analysis, normalized)
       └─ utils/                    
          ├─ __init__.py
          └─ text.py
