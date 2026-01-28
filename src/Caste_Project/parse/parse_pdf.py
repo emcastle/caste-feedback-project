@@ -1,337 +1,349 @@
 from __future__ import annotations
 
-import argparse
 import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
 
+# -----------------------------
+# Config
+# -----------------------------
 @dataclass(frozen=True)
-class PdfEntryValidationConfig:
-    # content checks
-    min_chars_primary: int = 200
-    min_words_primary: int = 30
+class PdfParseConfig:
+    """
+    Parse PDF entry_text into structured fields.
+    Assumes input is pdf_entries.parquet created by segment_pdf.py.
 
-    # header-heavy heuristic
-    header_heavy_ratio: float = 0.45  # if > this fraction of lines are "header-like", flag it
-    max_signature_tail_lines: int = 12  # used for optional signature-dominance heuristic
+    Key behavior:
+      - Extract email-like headers if present (From/To/Date/Subject)
+      - Extract CQAS id if present
+      - Prefer feedback content from "Incoming ... Response" spans if present
+      - Otherwise, fall back to "best-effort body text" after stripping headers
+    """
+    max_header_lines: int = 40
+    max_subject_chars: int = 500
+    max_name_chars: int = 300
+    max_date_chars: int = 120
 
-    # OCR/image checks
-    low_ocr_yield_chars: int = 50
-    low_ocr_yield_image_pages: int = 1
+    # If Incoming/Response exist, we take Incoming-only as the feedback_text.
+    prefer_incoming_section: bool = True
 
-    # rollup decision
-    needs_vision_if_missing_and_has_images: bool = True
-
-
-HEADER_LINE_PATTERNS: List[re.Pattern] = [
-    re.compile(r"^\s*From\s*:\s*", re.IGNORECASE),
-    re.compile(r"^\s*To\s*:\s*", re.IGNORECASE),
-    re.compile(r"^\s*Subject\s*:\s*", re.IGNORECASE),
-    re.compile(r"^\s*Date\s*:\s*", re.IGNORECASE),
-    re.compile(r"^\s*Requestor[’']?s\s+Name\s*:\s*", re.IGNORECASE),
-    re.compile(r"^\s*Date\s+of\s+Request\s*:\s*", re.IGNORECASE),
-    re.compile(r"^\s*Incoming\b", re.IGNORECASE),
-    re.compile(r"^\s*Response\b", re.IGNORECASE),
-    re.compile(r"^\s*-{2,}\s*Original Message\s*-{2,}\s*$", re.IGNORECASE),
-    re.compile(r"\bCQAS[-–—]?\s*\d{3,6}\b", re.IGNORECASE),
-]
-
-SIGNATURE_LINE_PATTERNS: List[re.Pattern] = [
-    re.compile(r"^\s*Sincerely\s*,?\s*$", re.IGNORECASE),
-    re.compile(r"^\s*Regards\s*,?\s*$", re.IGNORECASE),
-    re.compile(r"^\s*Respectfully\s*,?\s*$", re.IGNORECASE),
-    re.compile(r"^\s*Very Respectfully\s*,?\s*$", re.IGNORECASE),
-    re.compile(r"^\s*Thank you\s*,?\s*$", re.IGNORECASE),
-]
+    # If entry looks like "Response Follow-Up" only, label it.
+    classify_entry_type: bool = True
 
 
-def _safe_int(x, default: int = 0) -> int:
-    try:
-        if pd.isna(x):
-            return default
-        return int(x)
-    except Exception:
-        return default
+# -----------------------------
+# Regex anchors (field parsing)
+# -----------------------------
+RE_CQAS = re.compile(r"\bCQAS[-–—]?\s*(\d{3,8})\b", re.IGNORECASE)
+
+RE_FROM = re.compile(r"^\s*From\s*:\s*(.+?)\s*$", re.IGNORECASE)
+RE_TO = re.compile(r"^\s*To\s*:\s*(.+?)\s*$", re.IGNORECASE)
+RE_SUBJECT = re.compile(r"^\s*Subject\s*:\s*(.+?)\s*$", re.IGNORECASE)
+RE_DATE = re.compile(r"^\s*Date\s*:\s*(.+?)\s*$", re.IGNORECASE)
+
+# CQAS form headers (seen in your CQAS-style docs)
+RE_REQUESTOR = re.compile(r"^\s*Requestor[’']?s\s+Name\s*:\s*(.+?)\s*$", re.IGNORECASE)
+RE_DATE_OF_REQUEST = re.compile(r"^\s*Date\s+of\s+Request\s*:\s*(.+?)\s*$", re.IGNORECASE)
+
+# Section markers
+RE_INCOMING = re.compile(r"^\s*Incoming\b\s*:?$", re.IGNORECASE)
+RE_RESPONSE = re.compile(r"^\s*Response\b\s*:?$", re.IGNORECASE)
+RE_RESPONSE_FOLLOWUP = re.compile(r"^\s*Response\s+Follow[- ]?Up\b\s*:?$", re.IGNORECASE)
+RE_ORIGINAL_MESSAGE = re.compile(r"^\s*-{2,}\s*Original Message\s*-{2,}\s*$", re.IGNORECASE)
+
+# Signature-ish closings (used to trim tail sometimes)
+RE_SIGNATURE_LINE = re.compile(
+    r"^\s*(Sincerely|Regards|Respectfully|Very Respectfully|Thank you|Thanks)\b[, ]*\s*$",
+    re.IGNORECASE,
+)
 
 
-def _safe_bool(x) -> bool:
-    if isinstance(x, bool):
-        return x
-    if pd.isna(x):
+# -----------------------------
+# Helpers
+# -----------------------------
+def _split_lines(text: str) -> List[str]:
+    if not isinstance(text, str):
+        return []
+    return [ln.strip() for ln in text.splitlines()]
+
+def _first_match(lines: List[str], pat: re.Pattern, max_lines: int) -> Optional[str]:
+    for ln in lines[:max_lines]:
+        m = pat.match(ln)
+        if m:
+            return (m.group(1) or "").strip()
+    return None
+
+def _all_matches(text: str, pat: re.Pattern) -> List[str]:
+    return [m.group(0).strip() for m in pat.finditer(text or "")]
+
+def _find_section_span(lines: List[str], start_pat: re.Pattern, end_pat: re.Pattern) -> Optional[Tuple[int, int]]:
+    """
+    Returns (start_idx_exclusive, end_idx_inclusive) of content between markers.
+    Example:
+      Incoming
+      <content...>
+      Response
+    returns indices covering only the <content...> lines.
+    """
+    start_idx = None
+    for i, ln in enumerate(lines):
+        if start_pat.match(ln):
+            start_idx = i
+            break
+    if start_idx is None:
+        return None
+
+    end_idx = None
+    for j in range(start_idx + 1, len(lines)):
+        if end_pat.match(lines[j]):
+            end_idx = j
+            break
+
+    # Content starts after marker line
+    content_start = start_idx + 1
+
+    # If no end marker, content goes to end
+    content_end = (end_idx - 1) if end_idx is not None else (len(lines) - 1)
+
+    if content_end < content_start:
+        return None
+    return (content_start, content_end)
+
+def _strip_leading_headers(lines: List[str], cfg: PdfParseConfig) -> Tuple[List[str], Dict[str, Optional[str]]]:
+    """
+    Pull common headers from the first N lines and return:
+      - body_lines with header lines removed (best-effort)
+      - extracted fields dict
+    """
+    fields: Dict[str, Optional[str]] = {
+        "from": None,
+        "to": None,
+        "subject": None,
+        "date": None,
+        "requestor_name": None,
+        "date_of_request": None,
+    }
+
+    # Extract values from header-like lines
+    fields["from"] = _first_match(lines, RE_FROM, cfg.max_header_lines)
+    fields["to"] = _first_match(lines, RE_TO, cfg.max_header_lines)
+    fields["subject"] = _first_match(lines, RE_SUBJECT, cfg.max_header_lines)
+    fields["date"] = _first_match(lines, RE_DATE, cfg.max_header_lines)
+
+    fields["requestor_name"] = _first_match(lines, RE_REQUESTOR, cfg.max_header_lines)
+    fields["date_of_request"] = _first_match(lines, RE_DATE_OF_REQUEST, cfg.max_header_lines)
+
+    # Remove obvious header block: keep removing from top while line looks header-like/empty
+    def looks_headerish(ln: str) -> bool:
+        if not ln:
+            return True
+        if RE_FROM.match(ln) or RE_TO.match(ln) or RE_SUBJECT.match(ln) or RE_DATE.match(ln):
+            return True
+        if RE_REQUESTOR.match(ln) or RE_DATE_OF_REQUEST.match(ln):
+            return True
+        if RE_ORIGINAL_MESSAGE.match(ln):
+            return True
         return False
-    s = str(x).strip().lower()
-    return s in ("1", "true", "t", "yes", "y")
 
+    k = 0
+    while k < len(lines) and k < cfg.max_header_lines and looks_headerish(lines[k]):
+        k += 1
 
-def _normalize_text(s: Optional[str]) -> str:
-    if not isinstance(s, str):
-        return ""
-    return s.replace("\u00a0", " ").strip()
+    body_lines = lines[k:]
+    return body_lines, fields
 
-
-def _line_stats(text: str, cfg: PdfEntryValidationConfig) -> Dict[str, float]:
+def _trim_signature_tail(lines: List[str]) -> List[str]:
     """
-    Compute simple heuristics about the entry_text.
+    Trim after a likely signature closing line, if it occurs near the end.
     """
-    txt = _normalize_text(text)
-    if not txt:
-        return {
-            "num_lines": 0,
-            "num_header_like_lines": 0,
-            "header_like_ratio": 0.0,
-            "signature_tail_hits": 0,
-        }
-
-    lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
     if not lines:
-        return {
-            "num_lines": 0,
-            "num_header_like_lines": 0,
-            "header_like_ratio": 0.0,
-            "signature_tail_hits": 0,
-        }
+        return lines
+    # Find last signature marker
+    last_sig = None
+    for i, ln in enumerate(lines):
+        if RE_SIGNATURE_LINE.match(ln):
+            last_sig = i
+    if last_sig is None:
+        return lines
 
-    header_like = 0
-    for ln in lines:
-        if any(p.search(ln) for p in HEADER_LINE_PATTERNS):
-            header_like += 1
+    # If signature is near the end, cut there
+    if last_sig >= max(0, len(lines) - 25):
+        return lines[:last_sig]
+    return lines
 
-    # signature-tail heuristic: count signature markers in the last N lines
-    tail = lines[-min(len(lines), cfg.max_signature_tail_lines) :]
-    sig_hits = sum(1 for ln in tail if any(p.search(ln) for p in SIGNATURE_LINE_PATTERNS))
-
-    return {
-        "num_lines": float(len(lines)),
-        "num_header_like_lines": float(header_like),
-        "header_like_ratio": float(header_like) / max(1.0, float(len(lines))),
-        "signature_tail_hits": float(sig_hits),
-    }
-
-
-def _aggregate_pages_for_entry(pages_df: pd.DataFrame, doc_id: str, start_page: int, end_page: int) -> Dict[str, int]:
+def _classify_entry(lines: List[str]) -> str:
     """
-    Aggregate extraction signals across all pages in an entry span.
-    Assumes start_page/end_page are 0-based and inclusive.
+    Very simple type guess.
     """
-    p = pages_df[
-        (pages_df["doc_id"] == doc_id)
-        & (pages_df["page_num"] >= start_page)
-        & (pages_df["page_num"] <= end_page)
-    ].copy()
+    has_incoming = any(RE_INCOMING.match(ln) for ln in lines)
+    has_response = any(RE_RESPONSE.match(ln) for ln in lines)
+    has_followup = any(RE_RESPONSE_FOLLOWUP.match(ln) for ln in lines)
 
-    if p.empty:
-        return {
-            "num_pages_in_entry": 0,
-            "num_image_pages_in_entry": 0,
-            "ocr_text_total": 0,
-            "page_text_total": 0,
-            "has_images_in_entry": 0,
-            "ocr_present_in_entry": 0,
-        }
-
-    p["has_images"] = p["has_images"].apply(_safe_bool)
-    p["ocr_text_len"] = p["ocr_text_len"].apply(lambda x: _safe_int(x, 0))
-    p["page_text_len"] = p["page_text_len"].apply(lambda x: _safe_int(x, 0))
-
-    num_pages = int(p["page_num"].nunique())
-    num_image_pages = int(p["has_images"].sum())
-    ocr_total = int(p["ocr_text_len"].sum())
-    page_text_total = int(p["page_text_len"].sum())
-
-    has_images = 1 if num_image_pages > 0 else 0
-    ocr_present = 1 if ocr_total > 0 else 0
-
-    return {
-        "num_pages_in_entry": num_pages,
-        "num_image_pages_in_entry": num_image_pages,
-        "ocr_text_total": ocr_total,
-        "page_text_total": page_text_total,
-        "has_images_in_entry": has_images,
-        "ocr_present_in_entry": ocr_present,
-    }
+    if has_followup and not has_incoming:
+        return "response_followup"
+    if has_response and not has_incoming:
+        return "response_only"
+    if has_incoming and has_response:
+        return "incoming_plus_response"
+    if has_incoming:
+        return "incoming_only"
+    return "unknown"
 
 
-def validate_pdf_entries(
+# -----------------------------
+# Core parse
+# -----------------------------
+def parse_pdf_entries_to_fields(
     entries_df: pd.DataFrame,
-    pages_df: pd.DataFrame,
-    cfg: PdfEntryValidationConfig = PdfEntryValidationConfig(),
-) -> pd.DataFrame:
+    cfg: PdfParseConfig = PdfParseConfig(),
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Returns one row per entry with validation flags + summary metrics.
+    Input: pdf_entries.parquet (from segmenter)
+    Output:
+      - fields_wide_df: one row per (doc_id, entry_num)
+      - fields_long_df: one row per field per (doc_id, entry_num) (flexible truth)
     """
-    required_entry_cols = {"doc_id", "entry_num", "start_page", "end_page", "entry_text"}
-    missing = required_entry_cols - set(entries_df.columns)
+    wide_rows: List[Dict] = []
+    long_rows: List[Dict] = []
+
+    required_cols = {"doc_id", "entry_num", "entry_text"}
+    missing = required_cols - set(entries_df.columns)
     if missing:
-        raise ValueError(f"entries_df missing required columns: {sorted(missing)}")
-
-    required_pages_cols = {"doc_id", "page_num", "page_text_len", "ocr_text_len", "has_images"}
-    missing_p = required_pages_cols - set(pages_df.columns)
-    if missing_p:
-        raise ValueError(f"pages_df missing required columns: {sorted(missing_p)}")
-
-    out_rows: List[Dict] = []
+        raise ValueError(f"entries_df missing required cols: {sorted(missing)}")
 
     for _, r in entries_df.iterrows():
-        doc_id = str(r["doc_id"])
-        entry_num = _safe_int(r["entry_num"], 0)
+        doc_id = r["doc_id"]
+        entry_num = int(r["entry_num"]) if pd.notna(r["entry_num"]) else 0
+        entry_text = r.get("entry_text") or ""
 
-        start_page = r["start_page"]
-        end_page = r["end_page"]
-        start_page_i = _safe_int(start_page, 0)
-        end_page_i = _safe_int(end_page, start_page_i)
+        lines_all = _split_lines(entry_text)
 
-        entry_text = _normalize_text(r.get("entry_text"))
+        # Extract CQAS ids (could be none or multiple)
+        cqas_hits = _all_matches(entry_text, RE_CQAS)
+        cqas_id = cqas_hits[0] if cqas_hits else None
 
-        # Content metrics
-        content_len = len(entry_text)
-        word_count = len([w for w in re.split(r"\s+", entry_text) if w])
+        # Pull headers + remove header block from body candidate
+        body_lines, header_fields = _strip_leading_headers(lines_all, cfg)
 
-        stats = _line_stats(entry_text, cfg)
+        # Prefer "Incoming ... Response" content if present
+        feedback_text = ""
+        if cfg.prefer_incoming_section:
+            span = _find_section_span(lines_all, RE_INCOMING, RE_RESPONSE)
+            if span:
+                s, e = span
+                feedback_lines = lines_all[s : e + 1]
+                feedback_lines = _trim_signature_tail(feedback_lines)
+                feedback_text = "\n".join([ln for ln in feedback_lines if ln.strip()]).strip()
 
-        # Page/image/OCR metrics
-        page_aggs = _aggregate_pages_for_entry(pages_df, doc_id, start_page_i, end_page_i)
+        # If no incoming-span extracted, fallback to cleaned body
+        if not feedback_text:
+            cleaned = _trim_signature_tail(body_lines)
+            feedback_text = "\n".join([ln for ln in cleaned if ln.strip()]).strip()
 
-        # Flags
-        missing_content_primary = content_len == 0
-        too_short_content_primary = (content_len > 0) and (
-            content_len < cfg.min_chars_primary or word_count < cfg.min_words_primary
-        )
-        content_is_mostly_headers = (stats["num_lines"] > 0) and (stats["header_like_ratio"] >= cfg.header_heavy_ratio)
+        # Entry type (incoming vs response-only, etc.)
+        entry_type = _classify_entry(lines_all) if cfg.classify_entry_type else "unknown"
 
-        has_images_in_entry = bool(page_aggs["has_images_in_entry"])
-        ocr_present_in_entry = bool(page_aggs["ocr_present_in_entry"])
+        # Pick date: prefer CQAS "Date of Request" if present, else Date:
+        parsed_date = header_fields.get("date_of_request") or header_fields.get("date")
 
-        low_ocr_yield = (
-            has_images_in_entry
-            and page_aggs["ocr_text_total"] < cfg.low_ocr_yield_chars
-            and page_aggs["num_image_pages_in_entry"] >= cfg.low_ocr_yield_image_pages
-        )
+        # Wide row
+        wide = {
+            "doc_id": doc_id,
+            "entry_num": entry_num,
+            "start_page": r.get("start_page"),
+            "end_page": r.get("end_page"),
+            "seg_method": r.get("seg_method"),
+            "seg_confidence": r.get("seg_confidence"),
+            "entry_type": entry_type,
 
-        likely_nontext_graphics = has_images_in_entry and low_ocr_yield
+            "cqas_id": cqas_id,
+            "sender": header_fields.get("from") or header_fields.get("requestor_name"),
+            "receiver": header_fields.get("to"),
+            "subject": (header_fields.get("subject") or "")[: cfg.max_subject_chars] if header_fields.get("subject") else None,
+            "date": (parsed_date or "")[: cfg.max_date_chars] if parsed_date else None,
 
-        needs_vision_review = False
-        if cfg.needs_vision_if_missing_and_has_images and missing_content_primary and has_images_in_entry:
-            needs_vision_review = True
-        if low_ocr_yield and page_aggs["num_image_pages_in_entry"] >= 2:
-            needs_vision_review = True
-        if too_short_content_primary and has_images_in_entry and low_ocr_yield:
-            needs_vision_review = True
-
-        flags = {
-            "missing_content_primary": bool(missing_content_primary),
-            "too_short_content_primary": bool(too_short_content_primary),
-            "content_is_mostly_headers": bool(content_is_mostly_headers),
-            "has_images_in_entry": bool(has_images_in_entry),
-            "ocr_present_in_entry": bool(ocr_present_in_entry),
-            "low_ocr_yield": bool(low_ocr_yield),
-            "likely_nontext_graphics": bool(likely_nontext_graphics),
-            "needs_vision_review": bool(needs_vision_review),
+            "feedback_text": feedback_text,
+            "raw_entry_text": entry_text,
+            "error": r.get("error"),
         }
+        wide_rows.append(wide)
 
-        # Optional numeric quality score (0..100) for sorting/debug
-        score = 100
-        if missing_content_primary:
-            score -= 60
-        if too_short_content_primary:
-            score -= 25
-        if content_is_mostly_headers:
-            score -= 15
-        if needs_vision_review:
-            score -= 10
-        score = max(0, min(100, score))
+        # Long (flexible truth): one row per field
+        def emit(field_name: str, field_value: Optional[str]) -> None:
+            long_rows.append(
+                {
+                    "doc_id": doc_id,
+                    "entry_num": entry_num,
+                    "field_name": field_name,
+                    "field_value": field_value,
+                }
+            )
 
-        out_rows.append(
-            {
-                "doc_id": doc_id,
-                "entry_num": entry_num,
-                "start_page": start_page if pd.notna(start_page) else None,
-                "end_page": end_page if pd.notna(end_page) else None,
-                "content_primary_len": int(content_len),
-                "content_primary_words": int(word_count),
-                "num_lines": int(stats["num_lines"]),
-                "num_header_like_lines": int(stats["num_header_like_lines"]),
-                "header_like_ratio": float(stats["header_like_ratio"]),
-                "signature_tail_hits": int(stats["signature_tail_hits"]),
-                **page_aggs,
-                "needs_vision_review": bool(needs_vision_review),
-                "quality_score": int(score),
-                "flags_json": json.dumps(flags, ensure_ascii=False),
-                "error": None,
-            }
-        )
+        emit("cqas_id", cqas_id)
+        emit("sender", wide["sender"])
+        emit("receiver", wide["receiver"])
+        emit("subject", wide["subject"])
+        emit("date", wide["date"])
+        emit("entry_type", entry_type)
+        emit("feedback_text", feedback_text)
 
-    out = pd.DataFrame(out_rows)
+    fields_wide_df = pd.DataFrame(wide_rows)
+    fields_long_df = pd.DataFrame(long_rows)
 
-    # deterministic ordering + ensure entry_num contiguous per doc
-    if not out.empty:
-        out = out.sort_values(["doc_id", "start_page", "entry_num"]).reset_index(drop=True)
-        out["entry_num"] = out.groupby("doc_id").cumcount()
+    # Deterministic ordering + entry_num contiguity per doc (optional but helpful)
+    if not fields_wide_df.empty:
+        fields_wide_df = fields_wide_df.sort_values(["doc_id", "entry_num"]).reset_index(drop=True)
 
-    return out
+    if not fields_long_df.empty:
+        fields_long_df = fields_long_df.sort_values(["doc_id", "entry_num", "field_name"]).reset_index(drop=True)
+
+    return fields_wide_df, fields_long_df
 
 
+# -----------------------------
+# CLI
+# -----------------------------
 def main_cli() -> None:
     """
     Usage:
-      conda run -n feedback python -m Caste_Project.validate.validate_pdf_entries ^
-        --extract_dir data\\_test_output ^
-        --seg_dir data\\_seg_output ^
-        --out_dir data\\_val_output
+      conda run -n feedback python -m Caste_Project.parse.parse_pdf --in_dir data/_seg_output --out_dir data/_parse_output
+    Expects:
+      in_dir/pdf_entries.parquet
+    Writes:
+      out_dir/pdf_entry_fields.parquet       (wide)
+      out_dir/pdf_entry_fields_long.parquet  (long key/value)
     """
+    import argparse
+
     ap = argparse.ArgumentParser()
-    ap.add_argument("--extract_dir", required=True, help="Folder containing pdf_pages.parquet (extraction output)")
-    ap.add_argument("--seg_dir", required=True, help="Folder containing pdf_entries.parquet (segmentation output)")
-    ap.add_argument("--out_dir", required=True, help="Where to write pdf_entry_validation.parquet")
+    ap.add_argument("--in_dir", required=True)
+    ap.add_argument("--out_dir", required=True)
     args = ap.parse_args()
 
-    extract_dir = Path(args.extract_dir)
-    seg_dir = Path(args.seg_dir)
+    in_dir = Path(args.in_dir)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    pages_path = extract_dir / "pdf_pages.parquet"
-    entries_path = seg_dir / "pdf_entries.parquet"
+    entries_df = pd.read_parquet(in_dir / "pdf_entries.parquet")
 
-    if not pages_path.exists():
-        raise FileNotFoundError(f"Missing: {pages_path}")
-    if not entries_path.exists():
-        raise FileNotFoundError(f"Missing: {entries_path}")
+    wide_df, long_df = parse_pdf_entries_to_fields(entries_df, PdfParseConfig())
 
-    pages_df = pd.read_parquet(pages_path)
-    entries_df = pd.read_parquet(entries_path)
+    wide_df.to_parquet(out_dir / "pdf_entry_fields.parquet", index=False)
+    long_df.to_parquet(out_dir / "pdf_entry_fields_long.parquet", index=False)
 
-    cfg = PdfEntryValidationConfig()
+    print(f"Saved: {out_dir / 'pdf_entry_fields.parquet'}")
+    print(f"Saved: {out_dir / 'pdf_entry_fields_long.parquet'}")
 
-    val_df = validate_pdf_entries(entries_df=entries_df, pages_df=pages_df, cfg=cfg)
-    out_path = out_dir / "pdf_entry_validation.parquet"
-    val_df.to_parquet(out_path, index=False)
-
-    # human-friendly print (1-based pages + entry nums)
-    show = val_df.copy()
-    show["entry_num_1based"] = show["entry_num"] + 1
-    show["start_page_1based"] = show["start_page"].apply(lambda x: int(x) + 1 if pd.notna(x) else None)
-    show["end_page_1based"] = show["end_page"].apply(lambda x: int(x) + 1 if pd.notna(x) else None)
-
-    print(f"Saved: {out_path}")
-    cols = [
-        "doc_id",
-        "entry_num_1based",
-        "start_page_1based",
-        "end_page_1based",
-        "content_primary_len",
-        "num_image_pages_in_entry",
-        "ocr_text_total",
-        "needs_vision_review",
-        "quality_score",
-        "error",
-    ]
-    cols = [c for c in cols if c in show.columns]
-    print(show[cols].head(40).to_string(index=False))
+    # quick visibility
+    cols = ["doc_id", "entry_num", "entry_type", "cqas_id", "sender", "receiver", "date", "subject"]
+    cols = [c for c in cols if c in wide_df.columns]
+    print("\nParse quick checks (head):")
+    print(wide_df[cols].head(25).to_string(index=False))
 
 
 if __name__ == "__main__":
