@@ -6,6 +6,18 @@ This project uses a **Conda environment** (not `python -m venv`) and is designed
 > In Census enterprise environments, Conda is typically configured to use the internal Nexus proxy. This repo’s setup assumes Conda is already installed and configured on the machine (e.g., via Software Center with configurations set).
 
 ---
+## Notes to Self: 
+These are ideas that still need to be developed
+1. temporal layer 
+- look at sentiment per produc tover time (not sure what the cutoff ranges will be)
+2. normalize by organization/person 
+- enforce a sort of de-duplication/weighting/concentration monitoring to not skew 
+  feedback of a product 
+3. track responses and monitor 
+4. actionable summary per product
+- may also break it down by year or other meaningful variables 
+
+---
 
 ## Repo Files You’ll Use
 
