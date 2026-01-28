@@ -50,6 +50,12 @@ RE_DATE_FILE = re.compile(
     r")\b"
 )
 
+# Month year patterns
+RE_MONTH_YEAR = re.compile(
+    r"\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{4}\b",
+    re.IGNORECASE
+)
+
 # “Dear …” suggests letter format
 RE_DEAR = re.compile(r"^\s*Dear\b", re.IGNORECASE)
 
@@ -89,11 +95,18 @@ def _all_cqas_ids(text: str) -> List[str]:
             deduped.append(x)
     return deduped
 
-def _find_first_date_in_text(lines: List[str], max_lines: int) -> Optional[str]:
-    for ln in lines[:max_lines]:
-        m = RE_DATE_TEXT.search(ln)
-        if m:
-            return m.group(1).strip()
+def _find_first_date_in_text(text: str) -> str | None:
+    if not text:
+        return None
+
+    m = RE_DATE_TEXT.search(text)
+    if m:
+        return m.group(0)
+
+    m = RE_MONTH_YEAR.search(text)
+    if m:
+        return m.group(0)
+
     return None
 
 def _parse_filename_metadata(source_file: Optional[str]) -> Dict[str, Optional[str]]:
@@ -258,7 +271,7 @@ def parse_docx_entries_to_fields(
         sender_sig = _extract_sender_from_signature(lines, cfg)
 
         # choose best values
-        sender = sender_sig or file_meta.get("sender")
+        sender = file_meta.get("sender") or sender_sig
         subject = file_meta.get("subject")
         date = date_text or file_meta.get("date")
 
