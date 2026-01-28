@@ -77,6 +77,7 @@ python script_name.py
 
 ## FILE ORGANIZATION
 
+```
 caste-feedback-project/
 ├─ pyproject.toml
 ├─ environment.yml
@@ -123,7 +124,7 @@ caste-feedback-project/
       └─ utils/                    
          ├─ __init__.py
          └─ text.py
-
+```
 
 
 
