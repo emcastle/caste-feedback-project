@@ -503,6 +503,8 @@ def main_cli() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--in_dir", required=True)
     ap.add_argument("--out_dir", required=True)
+    ap.add_argument("--docs_dir", required=False, help="Folder containing pdf_documents.parquet (recommended)")
+    ap.add_argument("--documents_name", default="pdf_documents.parquet")
     args = ap.parse_args()
 
     in_dir = Path(args.in_dir)
@@ -510,7 +512,12 @@ def main_cli() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     entries_df = pd.read_parquet(in_dir / "pdf_entries.parquet")
-    documents_df = pd.read_parquet(docs_dir / "pdf_documents.parquet")
+    documents_df = None
+    if args.docs_dir:
+        docs_path = Path(args.docs_dir) / args.documents_name
+        if docs_path.exists():
+            documents_df = pd.read_parquet(docs_path)
+        # documents_df = pd.read_parquet(docs_dir / "pdf_documents.parquet")
 
     wide_df, long_df = parse_pdf_entries_to_fields(entries_df, documents_df, PdfParseConfig())
 
