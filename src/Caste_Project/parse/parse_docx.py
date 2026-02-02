@@ -30,7 +30,7 @@ class DocxParseConfig:
 # -----------------------------
 RE_CQAS = re.compile(r"\bCQAS[-–—]?\s*(\d{3,10})\b", re.IGNORECASE)
 
-# date patterns inside text (no "Date:" required)
+# Date patterns inside text (no "Date:" prompt required)
 RE_DATE_TEXT = re.compile(
     r"\b("
     r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|"
@@ -41,7 +41,7 @@ RE_DATE_TEXT = re.compile(
     re.IGNORECASE,
 )
 
-# date patterns inside filename like "10-22" or "10-22-2021" or "10222021"
+# Date patterns inside filename like "10-22" or "10-22-2021" or "10222021"
 RE_DATE_FILE = re.compile(
     r"\b("
     r"\d{1,2}[-_]\d{1,2}([-_]\d{2,4})?"
@@ -59,7 +59,7 @@ RE_MONTH_YEAR = re.compile(
 # “Dear …” suggests letter format
 RE_DEAR = re.compile(r"^\s*Dear\b", re.IGNORECASE)
 
-# closings suggest signature starts near the bottom
+# Closings suggest signature starts near the bottom
 RE_CLOSING = re.compile(
     r"^\s*(Sincerely|Regards|Respectfully|Very Respectfully|Thank you|Thanks)\b[, ]*\s*$",
     re.IGNORECASE,
@@ -72,8 +72,17 @@ RE_NAMEISH = re.compile(r"^[A-Z][A-Za-z.\-']+(?:\s+[A-Z][A-Za-z.\-']+){0,4}$")
 RE_HAS_ZIP = re.compile(r"\b\d{5}(-\d{4})?\b")
 RE_HAS_STATE_ZIP = re.compile(r"\b[A-Z]{2}\s+\d{5}(-\d{4})?\b")
 
+# email, divider, address blocks 
+RE_EMAIL = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
+RE_DIVIDER = re.compile(r"^\s*[_\-]{6,}\s*$")
+RE_ADDRESS_CUE = re.compile(
+    r"(u\.?\s*s\.?\s*census\s+bureau|via\s+electronic\s+mail|disclosure\s+avoidance|systems?)",
+    re.IGNORECASE,
+)
+RE_UNDERSCORE_LINE = re.compile(r"^\s*_{5,}\s*$")
 
-# -----------------------------
+
+# -----------------------------S
 # Helpers
 # -----------------------------
 def _split_lines(text: str) -> List[str]:
@@ -127,9 +136,10 @@ def _find_first_date_in_text(text, max_lines: int = 60) -> str | None:
 
     return None
 
+# If the meta data is only in the file title
 def _parse_filename_metadata(source_file: Optional[str]) -> Dict[str, Optional[str]]:
     """
-    Your observed pattern:
+    Observed pattern:
       "Greg Robinson - ASAN CENSUS FEEDBACK Group Quarters Final 10-22.docx"
     Heuristic:
       - sender: first token before first " - "
@@ -167,30 +177,80 @@ def _parse_filename_metadata(source_file: Optional[str]) -> Dict[str, Optional[s
 
     return meta
 
+# extract reciever from address block if it exists
 def _extract_receiver_block(lines: List[str], cfg: DocxParseConfig) -> Optional[str]:
     """
-    Receiver often appears as an address block at top of letter:
-      line1: agency/person
-      line2: street / office
-      line3: city state zip
-    We grab until first blank line, but only if it looks address-like.
+     Find a receiver/address block anywhere in the header region (not just at the top).
+    Strategy:
+      1) Split header into blocks separated by blank lines or underscore separators.
+      2) Score blocks based on strong receiver cues (email, 'via electronic mail', Census Bureau, etc.)
+      3) Return the best block if it meets a minimum score.
     """
     head = lines[: cfg.max_header_lines]
-    block: List[str] = []
-    for ln in head:
-        if not ln:
-            break
-        block.append(ln)
 
-    if not block:
+    # 1) build blocks
+    blocks: List[List[str]] = []
+    cur: List[str] = []
+
+    for ln in head:
+        ln = (ln or "").strip()
+
+        # treat underscore separators like a blank line boundary
+        is_sep = (not ln) or bool(RE_UNDERSCORE_LINE.match(ln))
+        if is_sep:
+            if cur:
+                blocks.append(cur)
+                cur = []
+            continue
+
+        cur.append(ln)
+
+    if cur:
+        blocks.append(cur)
+
+    if not blocks:
         return None
 
-    # must look like an address-ish block to count
-    joined = " ".join(block)
-    if RE_HAS_ZIP.search(joined) or RE_HAS_STATE_ZIP.search(joined) or len(block) >= 3:
-        # don’t return huge nonsense blocks
-        return "\n".join(block[:10]).strip()[: cfg.max_receiver_chars]
-    return None
+    # 2) score each block
+    def score_block(block: List[str]) -> int:
+        txt = "\n".join(block)
+        t = txt.lower()
+
+        score = 0
+
+        # strong cues
+        if "via electronic mail" in t:
+            score += 5
+        if "u.s. census bureau" in t or "us census bureau" in t:
+            score += 4
+        if RE_EMAIL.search(txt):
+            score += 4
+
+        # address-ish structure cues
+        if len(block) >= 3:
+            score += 2
+        if RE_HAS_ZIP.search(txt) or RE_HAS_STATE_ZIP.search(txt):
+            score += 2
+
+        # penalize blocks that look like titles/subjects only (very long single line)
+        if len(block) == 1 and len(block[0]) > 80:
+            score -= 2
+
+        return score
+
+    scored = [(score_block(b), b) for b in blocks]
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    best_score, best_block = scored[0]
+
+    # 3) require some minimum quality
+    # If you want to be strict, set this to 4; if you want looser, set to 3.
+    if best_score < 4:
+        return None
+
+    # cap and return
+    return "\n".join(best_block[:10]).strip()[: cfg.max_receiver_chars]
+
 
 def _extract_sender_from_signature(lines: List[str], cfg: DocxParseConfig) -> Optional[str]:
     """
@@ -285,7 +345,7 @@ def parse_docx_entries_to_fields(
 
         # content-derived
         date_text = _find_first_date_in_text(lines, max_lines=25)
-        receiver_block = _extract_receiver_block(lines, cfg)
+        receiver_block = _extract_receiver_block(lines, cfg) or "Not Applicable"
         sender_sig = _extract_sender_from_signature(lines, cfg)
 
         # choose best values
