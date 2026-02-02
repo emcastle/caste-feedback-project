@@ -159,7 +159,7 @@ def _parse_filename_metadata(source_file: Optional[str]) -> Dict[str, Optional[s
     if date_match:
         meta["date"] = date_match
 
-    # split on " - " (your naming convention)
+    # split on " - " (naming convention)
     parts = [p.strip() for p in stem.split(" - ") if p.strip()]
     if parts:
         meta["sender"] = parts[0][:300]
@@ -244,7 +244,7 @@ def _extract_receiver_block(lines: List[str], cfg: DocxParseConfig) -> Optional[
     best_score, best_block = scored[0]
 
     # 3) require some minimum quality
-    # If you want to be strict, set this to 4; if you want looser, set to 3.
+    # If to be strict, set this to 4; looser, set to 3.
     if best_score < 4:
         return None
 
@@ -291,7 +291,7 @@ def _classify_docx_entry(lines: List[str]) -> str:
 
     if has_dear or has_closing:
         return "letter"
-    # if it looks like an email (rare in your 3)
+    # if it looks like an email (rare)
     if any(ln.lower().startswith(("from:", "to:", "subject:", "date:")) for ln in head):
         return "email_like"
     return "memo_or_note"
@@ -312,7 +312,7 @@ def parse_docx_entries_to_fields(
 
     df = entries_df.copy()
 
-    # Bring in filename metadata (critical for your observed pattern)
+    # Bring in filename metadata (critical for observed pattern)
     if documents_df is not None and "source_file" in documents_df.columns:
         df = df.merge(
             documents_df[["doc_id", "source_file", "source_rel_path"]].drop_duplicates("doc_id"),
@@ -336,7 +336,7 @@ def parse_docx_entries_to_fields(
 
         lines = _split_lines(entry_text)
 
-        # CQAS (may be absent in your DOCX letters)
+        # CQAS (may be absent in DOCX letters)
         cqas_ids = _all_cqas_ids(entry_text)
         cqas_id = cqas_ids[0] if cqas_ids else None
 
@@ -356,7 +356,7 @@ def parse_docx_entries_to_fields(
         # entry type
         entry_type = _classify_docx_entry(lines)
 
-        # feedback_text: for letters just keep whole entry (you can refine later)
+        # feedback_text: for letters just keep whole entry (can refine later)
         feedback_text = entry_text.strip()
 
         # cap strings
