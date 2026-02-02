@@ -296,7 +296,6 @@ def _classify_docx_entry(lines: List[str]) -> str:
         return "email_like"
     return "memo_or_note"
 
-
 # -----------------------------
 # Core parse
 # -----------------------------

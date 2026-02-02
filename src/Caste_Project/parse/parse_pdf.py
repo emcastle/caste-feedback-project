@@ -62,6 +62,11 @@ RE_SIGNATURE_LINE = re.compile(
     re.IGNORECASE,
 )
 
+# meta data from file titles 
+RE_CQAS_IN_FILE = re.compile(r"\bCQAS[-–—_ ]?\s*(\d{3,10})\b", re.IGNORECASE)
+
+# characters that separate tokens in filenames 
+RE_FILE_SEP = re.compile(r"[_\-]+")
 
 # -----------------------------
 # Helpers
@@ -194,12 +199,62 @@ def _classify_entry(lines: List[str]) -> str:
         return "incoming_only"
     return "unknown"
 
+def _parse_pdf_filename_metadata(source_file: Optional[str]) -> Dict[str, Optional[str]]:
+    """
+    Extract CQAS + subject from filename patterns like:
+      "CQAS-12345_Responses to the CSAC Recommendations from 2022 Spring Meeting.pdf"
+
+    Heuristics:
+      - cqas_id: first CQAS token anywhere in stem
+      - subject: remainder of stem after CQAS token (strip separators), else stem itself
+    """
+    meta = {"cqas_id": None, "subject": None}
+    if not source_file:
+        return meta
+
+    stem = Path(source_file).stem.strip()
+    if not stem:
+        return meta
+
+    m = RE_CQAS_IN_FILE.search(stem)
+    if m:
+        num = (m.group(1) or "").strip()
+        if num:
+            meta["cqas_id"] = f"CQAS-{num}"
+
+        # subject = substring after the matched token in the stem
+        tail = stem[m.end():].strip()
+        # remove leading separators like "_" "-" " "
+        tail = tail.lstrip(" _-–—")
+        tail = RE_FILE_SEP.sub(" ", tail)  # normalize underscores/dashes to spaces
+        tail = re.sub(r"\s{2,}", " ", tail).strip()
+
+        meta["subject"] = tail if tail else None
+        return meta
+
+    # No CQAS in filename: treat entire stem as a potential subject if it looks informative
+    cleaned = RE_FILE_SEP.sub(" ", stem)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    meta["subject"] = cleaned if cleaned else None
+    return meta
+
+def _clean_subject(s: Optional[str]) -> Optional[str]:
+    if not s:
+        return None
+    s = s.strip()
+    if len(s) < 5:
+        return None
+    # reject subject that's basically only CQAS
+    if RE_CQAS_IN_FILE.fullmatch(s):
+        return None
+    return s
 
 # -----------------------------
 # Core parse
 # -----------------------------
 def parse_pdf_entries_to_fields(
     entries_df: pd.DataFrame,
+    documents_df: Optional[pd.DataFrame] = None,
     cfg: PdfParseConfig = PdfParseConfig(),
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
@@ -215,6 +270,131 @@ def parse_pdf_entries_to_fields(
     missing = required_cols - set(entries_df.columns)
     if missing:
         raise ValueError(f"entries_df missing required cols: {sorted(missing)}")
+
+
+    df = entries_df.copy()
+
+    # Bring in filename metadata if provided
+    if documents_df is not None and "source_file" in documents_df.columns:
+        df = df.merge(
+            documents_df[["doc_id", "source_file"]].drop_duplicates("doc_id"),
+            on="doc_id",
+            how="left",
+        )
+    else:
+        if "source_file" not in df.columns:
+            df["source_file"] = None
+
+    for _, r in df.iterrows():
+        doc_id = r["doc_id"]
+        entry_num = int(r["entry_num"]) if pd.notna(r["entry_num"]) else 0
+        entry_text = r.get("entry_text") or ""
+        source_file = r.get("source_file")
+
+        lines_all = _split_lines(entry_text)
+
+        # CQAS ids from text (could be none or multiple)
+        cqas_hits_text = _all_matches(entry_text, RE_CQAS)
+        cqas_id_text = cqas_hits_text[0] if cqas_hits_text else None
+
+        # CQAS + subject from filename (fallbacks)
+        file_meta = _parse_pdf_filename_metadata(source_file)
+        cqas_id_file = file_meta.get("cqas_id")
+        subject_file = _clean_subject(file_meta.get("subject"))
+
+        # Pull headers + remove header block from body candidate
+        body_lines, header_fields = _strip_leading_headers(lines_all, cfg)
+
+        # Prefer "Incoming ... Response" content if present
+        feedback_text = ""
+        if cfg.prefer_incoming_section:
+            span = _find_section_span(lines_all, RE_INCOMING, RE_RESPONSE)
+            if span:
+                s, e = span
+                feedback_lines = lines_all[s : e + 1]
+                feedback_lines = _trim_signature_tail(feedback_lines)
+                feedback_text = "\n".join([ln for ln in feedback_lines if ln.strip()]).strip()
+
+        # If no incoming-span extracted, fallback to cleaned body
+        if not feedback_text:
+            cleaned = _trim_signature_tail(body_lines)
+            feedback_text = "\n".join([ln for ln in cleaned if ln.strip()]).strip()
+
+        # Entry type (incoming vs response-only, etc.)
+        entry_type = _classify_entry(lines_all) if cfg.classify_entry_type else "unknown"
+
+        # Pick date: prefer CQAS "Date of Request" if present, else Date:
+        parsed_date = header_fields.get("date_of_request") or header_fields.get("date")
+
+        # sender/receiver/subject from headers
+        sender = header_fields.get("from") or header_fields.get("requestor_name")
+        receiver = header_fields.get("to")
+        subject_hdr = header_fields.get("subject")
+
+        # FINAL CQAS: prefer text; fallback to filename
+        cqas_id = cqas_id_text or cqas_id_file
+
+        # FINAL subject: prefer header subject; fallback to filename subject
+        subject = subject_hdr or subject_file
+        subject = (subject or "")[: cfg.max_subject_chars] if subject else None
+
+        # Wide row
+        wide = {
+            "doc_id": doc_id,
+            "entry_num": entry_num,
+            "start_page": r.get("start_page"),
+            "end_page": r.get("end_page"),
+            "seg_method": r.get("seg_method"),
+            "seg_confidence": r.get("seg_confidence"),
+            "entry_type": entry_type,
+
+            "cqas_id": cqas_id,
+            "sender": sender,
+            "receiver": receiver,
+            "subject": subject,
+            "date": (parsed_date or "")[: cfg.max_date_chars] if parsed_date else None,
+
+            "feedback_text": feedback_text,
+            "raw_entry_text": entry_text,
+            "source_file": source_file,  # keep for debugging
+            "error": r.get("error"),
+        }
+        wide_rows.append(wide)
+
+        # Long: one row per field
+        def emit(field_name: str, field_value: Optional[str]) -> None:
+            long_rows.append(
+                {
+                    "doc_id": doc_id,
+                    "entry_num": entry_num,
+                    "field_name": field_name,
+                    "field_value": field_value,
+                }
+            )
+
+        emit("cqas_id", cqas_id)
+        emit("sender", sender)
+        emit("receiver", receiver)
+        emit("subject", subject)
+        emit("date", wide["date"])
+        emit("entry_type", entry_type)
+        emit("feedback_text", feedback_text)
+
+    fields_wide_df = pd.DataFrame(wide_rows)
+    fields_long_df = pd.DataFrame(long_rows)
+
+    if not fields_wide_df.empty:
+        fields_wide_df = fields_wide_df.sort_values(["doc_id", "entry_num"]).reset_index(drop=True)
+
+    if not fields_long_df.empty:
+        fields_long_df = fields_long_df.sort_values(["doc_id", "entry_num", "field_name"]).reset_index(drop=True)
+
+    return fields_wide_df, fields_long_df
+
+
+
+
+"""
 
     for _, r in entries_df.iterrows():
         doc_id = r["doc_id"]
@@ -303,7 +483,7 @@ def parse_pdf_entries_to_fields(
         fields_long_df = fields_long_df.sort_values(["doc_id", "entry_num", "field_name"]).reset_index(drop=True)
 
     return fields_wide_df, fields_long_df
-
+"""
 
 # -----------------------------
 # CLI
@@ -330,8 +510,9 @@ def main_cli() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     entries_df = pd.read_parquet(in_dir / "pdf_entries.parquet")
+    documents_df = pd.read_parquet(docs_dir / "pdf_documents.parquet")
 
-    wide_df, long_df = parse_pdf_entries_to_fields(entries_df, PdfParseConfig())
+    wide_df, long_df = parse_pdf_entries_to_fields(entries_df, documents_df, PdfParseConfig())
 
     wide_df.to_parquet(out_dir / "pdf_entry_fields.parquet", index=False)
     long_df.to_parquet(out_dir / "pdf_entry_fields_long.parquet", index=False)
