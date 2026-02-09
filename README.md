@@ -8,7 +8,6 @@ This project uses a **Conda environment** (not `python -m venv`) and is designed
 ---
 ## Notes to Self:
 **To do list **
-00. INGEST csv isn't ingesting .xlsx files and that means only 1/3 of the test files are being processed by the segment and parse
 0. Need to confirm that parse_pdf correctly parses title for CQAS and metadata, need more test files that include CQAS in the title added to test input
 1. fix parse_csv, issue is as follows: " because one whole csv may be the feedback from one person, the columns and rows are not things that can be matched to others because they are extremely specific. In the test examples cols are as follows..."
 
