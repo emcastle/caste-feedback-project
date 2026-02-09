@@ -10,18 +10,24 @@ This project uses a **Conda environment** (not `python -m venv`) and is designed
 **To do list **
 0. Need to confirm that parse_pdf correctly parses title for CQAS and metadata, need more test files that include CQAS in the title added to test input
 1. fix parse_csv, issue is as follows: " because one whole csv may be the feedback from one person, the columns and rows are not things that can be matched to others because they are extremely specific. In the test examples cols are as follows..."
+      this is creating too many entry_num when the whole file is just from one person/org.
+2. orchestrator script now that most extension types are done 
+3. find data product(s) mentioned based on name (initially)
+4. find data product(s) mentioned based on characteristics/descriptions of the data products
+5. convert the timeline to code to then reference for temporabl analysis
 
 
 
 *These are ideas that still need to be developed*
 1. temporal layer 
-- look at sentiment per produc tover time (not sure what the cutoff ranges will be)
+- look at sentiment per product over time (not sure what the cutoff ranges will be)
 2. normalize by organization/person 
 - enforce a sort of de-duplication/weighting/concentration monitoring to not skew 
   feedback of a product 
 3. track responses and monitor 
 4. actionable summary per product
 - may also break it down by year or other meaningful variables 
+5. check for CQAS duplicates or other signs of duplicates like exact text matches 
 
 ---
 
