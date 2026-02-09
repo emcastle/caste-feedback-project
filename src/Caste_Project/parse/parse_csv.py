@@ -20,6 +20,10 @@ class CsvParseConfig:
       - Extract best-effort fields (date/sender/receiver/subject/cqas)
       - Provide feedback_text for downstream NLP
 
+    Expects:
+    in_dir/csv_entries.parquet
+    docs_dir/csv_documents.parquet (recommended)
+
     Notes:
       - CSV schemas vary widely, so we use heuristics + optional column hints.
     """
@@ -138,6 +142,133 @@ def _make_feedback_text(row: pd.Series) -> str:
 
 
 # -----------------------------
+# Filename/title metadata patterns
+# -----------------------------
+RE_DATE_FILENAME = re.compile(
+    r"(?P<mdy>\b\d{1,2}[ _/-]\d{1,2}[ _/-]\d{2,4}\b)"          # 03 28 2025, 03-28-2025, 03/28/25
+    r"|(?P<compact>\b\d{8}\b)",                                # 12142021 (MMDDYYYY)
+    re.IGNORECASE,
+)
+
+RE_FEEDBACK_TOKEN = re.compile(r"\bfeedback\b", re.IGNORECASE)
+
+
+def _clean_title_for_parse(s: str) -> str:
+    """
+    Normalize a filename/title into a space-separated string.
+    - drops file extension
+    - replaces underscores with spaces
+    - collapses whitespace
+    """
+    s = _safe_str(s)
+    if not s:
+        return ""
+    # If it's a path/filename, drop extension and directories
+    try:
+        s = Path(s).name
+        s = Path(s).stem
+    except Exception:
+        pass
+    s = s.replace("_", " ")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _extract_date_from_title(title: str) -> Optional[str]:
+    """
+    Best-effort date extraction from filename/title.
+    Returns a string; does not attempt strict normalization beyond compact MMDDYYYY.
+    """
+    t = _clean_title_for_parse(title)
+    if not t:
+        return None
+
+    m = RE_DATE_FILENAME.search(t)
+    if not m:
+        return None
+
+    if m.group("mdy"):
+        # Keep as-is (normalized spacing) so downstream can normalize if needed
+        return m.group("mdy").replace("_", " ").strip()
+
+    if m.group("compact"):
+        s = m.group("compact")
+        # Assume MMDDYYYY
+        mm, dd, yyyy = s[0:2], s[2:4], s[4:8]
+        return f"{mm}/{dd}/{yyyy}"
+
+    return None
+
+
+def _remove_substring_case_insensitive(haystack: str, needle: str) -> str:
+    if not haystack or not needle:
+        return haystack
+    return re.sub(re.escape(needle), "", haystack, flags=re.IGNORECASE).strip()
+
+
+def _extract_sender_subject_from_title(title: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Heuristics:
+      - If "feedback" appears, text before it often resembles a sender/org name.
+      - Remaining text becomes subject/event.
+      - If no "feedback", treat entire title as subject.
+    """
+    t = _clean_title_for_parse(title)
+    if not t:
+        return None, None
+
+    sender: Optional[str] = None
+    subject: Optional[str] = None
+
+    if RE_FEEDBACK_TOKEN.search(t):
+        # Split once on "feedback" (case-insensitive)
+        parts = RE_FEEDBACK_TOKEN.split(t, maxsplit=1)
+        left = (parts[0] or "").strip(" -_")
+        right = (parts[1] or "").strip(" -_")
+
+        sender = left if left else None
+        subject = right if right else None
+    else:
+        subject = t
+
+    # Strip a detected date out of sender/subject (common in filenames)
+    dt = _extract_date_from_title(t)
+    if dt:
+        if sender:
+            sender = _remove_substring_case_insensitive(sender, dt) or sender
+        if subject:
+            subject = _remove_substring_case_insensitive(subject, dt) or subject
+
+    # Light cleanup: collapse whitespace again
+    if sender:
+        sender = re.sub(r"\s+", " ", sender).strip()
+        if len(sender) < 2:
+            sender = None
+    if subject:
+        subject = re.sub(r"\s+", " ", subject).strip()
+        if len(subject) < 2:
+            subject = None
+
+    return sender, subject
+
+
+def _file_level_defaults_from_row(r: pd.Series) -> Dict[str, Optional[str]]:
+    """
+    Use source_file/source_rel_path (if present) to infer metadata defaults.
+    Returns dict with keys: file_sender, file_subject, file_date
+    """
+    source = _safe_str(r.get("source_file")) or _safe_str(r.get("source_rel_path")) or ""
+    if not source:
+        return {"file_sender": None, "file_subject": None, "file_date": None}
+
+    file_sender, file_subject = _extract_sender_subject_from_title(source)
+    file_date = _extract_date_from_title(source)
+
+    return {"file_sender": file_sender, "file_subject": file_subject, "file_date": file_date}
+
+
+
+# -----------------------------
 # Core parse
 # -----------------------------
 def parse_csv_rows_to_fields(
@@ -194,6 +325,9 @@ def parse_csv_rows_to_fields(
         # entry_num mirrors row_num (this is your “segmentation” for CSV)
         entry_num = row_num
 
+        # apply metadata labels
+        file_defaults = _file_level_defaults_from_row(r)
+
         # Build a big text blob for CQAS scan / fallbacks
         feedback_text = _safe_str(r.get("row_text")) or ""
         if not feedback_text:
@@ -207,6 +341,13 @@ def parse_csv_rows_to_fields(
         sender = _best_text_from_columns(r, sender_col)
         receiver = _best_text_from_columns(r, receiver_col)
         subject = _best_text_from_columns(r, subject_col)
+        # fallback to meta data 
+        if not sender:
+            sender = file_defaults.get("file_sender")
+        if not subject:
+            subject = file_defaults.get("file_subject")
+        if not date:
+            date = file_defaults.get("file_date")
 
         # If there is a dedicated feedback/comment column, prefer that as feedback_text
         fb = _best_text_from_columns(r, feedback_col)
@@ -234,6 +375,10 @@ def parse_csv_rows_to_fields(
             "row_num": row_num,
             "source_file": r.get("source_file"),
             "source_rel_path": r.get("source_rel_path"),
+            "file_sender": file_defaults.get("file_sender"),
+            "file_subject": file_defaults.get("file_subject"),
+            "file_date": file_defaults.get("file_date"),
+
 
             "entry_type": entry_type,
 
@@ -244,6 +389,7 @@ def parse_csv_rows_to_fields(
             "receiver": receiver,
             "date": date,
             "subject": subject,
+        
 
             "feedback_text": feedback_text,
             "raw_row_json": json.dumps(
@@ -296,7 +442,7 @@ def main_cli() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--in_dir", required=True)
     ap.add_argument("--out_dir", required=True)
-    ap.add_argument("--rows_name", default="csv_rows.parquet")
+    ap.add_argument("--rows_name", default="csv_entries.parquet")
     ap.add_argument("--docs_dir", required=False, help="Folder containing csv_documents.parquet (recommended)")
     ap.add_argument("--documents_name", default="csv_documents.parquet")
     args = ap.parse_args()
