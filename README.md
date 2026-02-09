@@ -6,8 +6,12 @@ This project uses a **Conda environment** (not `python -m venv`) and is designed
 > In Census enterprise environments, Conda is typically configured to use the internal Nexus proxy. This repo’s setup assumes Conda is already installed and configured on the machine (e.g., via Software Center with configurations set).
 
 ---
-## Notes to Self: 
-These are ideas that still need to be developed
+## Notes to Self:
+**To do list **
+0. Need to confirm that parse_pdf correctly parses title for CQAS and metadata, need more test files that include CQAS in the title added to test input
+1. fix parse_csv, issue is as follows: " because one whole csv may be the feedback from one person, the columns and rows are not things that can be matched to others because they are extremely specific. In the test examples cols are as follows..."
+
+*These are ideas that still need to be developed*
 1. temporal layer 
 - look at sentiment per produc tover time (not sure what the cutoff ranges will be)
 2. normalize by organization/person 
