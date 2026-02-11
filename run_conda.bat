@@ -58,6 +58,18 @@ if errorlevel 1 (
   exit /b 1
 )
 
+REM make project importable as a real package (Caste_Project...) 
+REM aka run .toml to apply to the environment and make the package importable 
+REM Install/refresh the local project package (editable) so -m Caste_Project... works
+echo Installing project package (editable)...
+conda run -n "%ENV_NAME%" python -m pip install -e .
+if errorlevel 1 (
+  echo ERROR: failed to install project package (pip install -e .)
+  pause
+  exit /b 1
+)
+
+
 REM Run sanity check / entrypoint without activation
 if not exist "%ENTRYPOINT%" (
   echo ERROR: ENTRYPOINT not found: %ENTRYPOINT%
@@ -66,14 +78,16 @@ if not exist "%ENTRYPOINT%" (
 )
 
 REM Handle updates only
-if /I "MODE"=="install" (
+if /I "%MODE%"=="install" (
   echo Install/update complete. Skipping entrypoint.
   pause
   exit /b 0
 )
 
-echo Running entrypoint: %ENTRYPOINT%
-conda run -n "%ENV_NAME%" python "%ENTRYPOINT%"
+REM echo Running entrypoint: %ENTRYPOINT%
+REM conda run -n "%ENV_NAME%" python "%ENTRYPOINT%"
+conda run -n "%ENV_NAME%" python -m Caste_Project.cli
+
 
 set "EXITCODE=%ERRORLEVEL%"
 echo.
