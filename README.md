@@ -105,7 +105,7 @@ caste-feedback-project/
 │  ├─ _test_input/
 │  │  ├─ pdf/
 │  │  ├─ docx/
-│  │  ├─ csv/
+│  │  ├─ csv/                # mixed with .xlsx files
 │  │  ├─ pptx/
 │  │  └─ json/
 │  ├─ _test_output/          # ingestion outputs (parquet)
@@ -113,6 +113,7 @@ caste-feedback-project/
 ├─ notebooks/
 └─ src/
    └─ Caste_Project/
+      ├─ cli.py 
       ├─ __init__.py
       ├─ ingest/
       │  ├─ __init__.py
@@ -123,7 +124,7 @@ caste-feedback-project/
       │     ├─ document_docx.py
       │     ├─ presentation_pptx.py
       │     ├─ tabular_csv.py
-      │     ├─ tabular_excel.py
+      │     ├─ tabular_xlsx.py
       │     ├─ structured_json.py
       │     └─ document_txt.py        # even if no txt exists now 
       ├─ segment/
@@ -132,11 +133,16 @@ caste-feedback-project/
       │  ├─ segment_docx.py
       │  ├─ segment_json.py
       │  ├─ segment_csv.py
-      │  ├─ segment_excel.py
+      │  ├─ segment_xlsx.py
       │  └─ segment_pptx.py
-      ├─ parse/                       # Work In Progess
+      ├─ parse/                       
       │  ├─ __init__.py
-      │  └─ (future: parse_pdf.py, parse_docx.py, etc.)
+      │  ├─ parse_csv.py
+      │  ├─ parse_docx.py
+      │  ├─ parse_json.py
+      │  ├─ parse_pdf.py 
+      │  ├─ parse_pptx.py
+      │  └─ parse_xlsx.py
       ├─ nlp/
       |  ├─ __init__.py
       |  └─ (future: polarity, sentiment analysis, actionable summary, temporal analysis, normalized)
