@@ -61,6 +61,7 @@ if errorlevel 1 (
 REM make project importable as a real package (Caste_Project...) 
 REM aka run .toml to apply to the environment and make the package importable 
 REM Install/refresh the local project package (editable) so -m Caste_Project... works
+REM "tell pip to put my project into the environment so python can always find it"
 echo Installing project package (editable)...
 conda run -n "%ENV_NAME%" python -m pip install -e .
 if errorlevel 1 (

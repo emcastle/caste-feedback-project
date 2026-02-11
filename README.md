@@ -2,8 +2,11 @@
 # Caste_Project — Setup & Run (Windows / Conda)
 
 This project uses a **Conda environment** (not `python -m venv`) and is designed so a user can run everything by double-clicking a `.bat` file.
+- when you double-click in the file explorer, windows runs it using cmd.exe
 
 > In Census enterprise environments, Conda is typically configured to use the internal Nexus proxy. This repo’s setup assumes Conda is already installed and configured on the machine (e.g., via Software Center with configurations set).
+
+> This repo uses src/ package layout and defines the package in pyproject.toml. After Conda creates/updates the environment, the .bat runner installs the project into the environment in editable mode. 
 
 ---
 ## Notes to Self:
