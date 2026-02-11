@@ -72,7 +72,7 @@ a. Edit the environment.yml and add/remove packages under dependencies
 b. To apply the update (without running the pipeline or rebuilding the venv)
 >> .\run_conda.yaml install
 
-## )3 How the Environment Works
+## 3) How the Environment Works
 The Conda environment is set in the environment.yml
 "name: feedback"
 

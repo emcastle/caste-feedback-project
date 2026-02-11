@@ -266,6 +266,75 @@ def _file_level_defaults_from_row(r: pd.Series) -> Dict[str, Optional[str]]:
 
     return {"file_sender": file_sender, "file_subject": file_subject, "file_date": file_date}
 
+def _norm(s: str) -> str:
+    return (s or "").strip().lower()
+
+
+def _has_any_col(columns: List[str], tokens: List[str]) -> bool:
+    cols = [_norm(c) for c in columns]
+    for t in tokens:
+        tt = t.lower()
+        if any(tt in c for c in cols):
+            return True
+    return False
+
+
+def _nunique_nonempty(series: pd.Series) -> int:
+    s = series.fillna("").astype(str).str.strip()
+    s = s[s != ""]
+    return int(s.nunique()) if not s.empty else 0
+
+
+def _should_parse_csv_as_rows(rows_df: pd.DataFrame) -> bool:
+    """
+    Decide entry granularity for a given doc_id:
+      True  => row-level entries
+      False => document-level (one entry per doc)
+    """
+    cols = list(rows_df.columns)
+
+    # Column-name signals that imply multiple submitters/entries
+    submitter_tokens = [
+        "submitter", "requestor", "requester", "author",
+        "first name", "last name", "organization", "org",
+        "email", "contact", "name"
+    ]
+    # NOTE: "name" alone is broad; the real gate is that it appears alongside submitter/requestor patterns
+    has_submitter_cols = _has_any_col(cols, ["submitter", "requestor", "requester", "author"]) and _has_any_col(
+        cols, ["first", "last", "organization", "email", "contact", "name"]
+    )
+
+    # Strong multi-entry structure signals
+    has_cqas_col = _has_any_col(cols, ["cqas"])
+    has_theme_category_cols = _has_any_col(cols, ["theme", "category", "issue", "topic"])
+    has_response_cols = _has_any_col(cols, ["response", "reply", "resolved", "resolution", "status"])
+    has_incoming_cols = _has_any_col(cols, ["incoming", "comment", "feedback", "message", "notes", "document detail"])
+
+    if has_submitter_cols:
+        return True
+
+    # If it explicitly has response/incoming columns per row, it's almost certainly multi-entry
+    if has_response_cols and has_incoming_cols:
+        return True
+
+    # If it has a CQAS column and many distinct CQAS values, likely row-level entries
+    if has_cqas_col:
+        cqas_like = None
+        for c in cols:
+            if "cqas" in _norm(c):
+                cqas_like = c
+                break
+        if cqas_like is not None:
+            if _nunique_nonempty(rows_df[cqas_like]) >= 3:
+                return True
+
+    # If it has category/theme style columns AND a decent number of rows, assume row-level
+    # (because it reads like a list of issues/items)
+    if has_theme_category_cols and len(rows_df) >= 5:
+        return True
+
+    # Default: document-level
+    return False
 
 
 # -----------------------------
@@ -445,6 +514,7 @@ def main_cli() -> None:
     ap.add_argument("--rows_name", default="csv_entries.parquet")
     ap.add_argument("--docs_dir", required=False, help="Folder containing csv_documents.parquet (recommended)")
     ap.add_argument("--documents_name", default="csv_documents.parquet")
+    ap.add_argument("--granularity", choices=["row", "document", "auto"], default="row")
     args = ap.parse_args()
 
     in_dir = Path(args.in_dir)
@@ -463,10 +533,33 @@ def main_cli() -> None:
         if docs_path.exists():
             documents_df = pd.read_parquet(docs_path)
 
-    wide_df, long_df = parse_csv_rows_to_fields(rows_df, documents_df, CsvParseConfig())
+    #wide_df, long_df = parse_csv_rows_to_fields(rows_df, documents_df, CsvParseConfig())
 
-    wide_df.to_parquet(out_dir / "csv_entry_fields.parquet", index=False)
-    long_df.to_parquet(out_dir / "csv_entry_fields_long.parquet", index=False)
+    #wide_df.to_parquet(out_dir / "csv_entry_fields.parquet", index=False)
+    #long_df.to_parquet(out_dir / "csv_entry_fields_long.parquet", index=False)
+    cfg = CsvParseConfig()
+
+    if args.granularity == "document":
+        wide_df, long_df = parse_csv_docs_to_fields(rows_df, documents_df, cfg)
+
+    elif args.granularity == "row":
+        wide_df, long_df = parse_csv_rows_to_fields(rows_df, documents_df, cfg)
+
+    else:
+        # auto: decide per doc_id
+        wide_parts = []
+        long_parts = []
+        for doc_id, g in rows_df.groupby("doc_id", sort=False):
+            if _should_parse_csv_as_rows(g):
+                w, l = parse_csv_rows_to_fields(g, documents_df, cfg)
+            else:
+                w, l = parse_csv_docs_to_fields(g, documents_df, cfg)
+            wide_parts.append(w)
+            long_parts.append(l)
+
+        wide_df = pd.concat(wide_parts, ignore_index=True) if wide_parts else pd.DataFrame()
+        long_df = pd.concat(long_parts, ignore_index=True) if long_parts else pd.DataFrame()
+
 
     print(f"Saved: {out_dir / 'csv_entry_fields.parquet'}")
     print(f"Saved: {out_dir / 'csv_entry_fields_long.parquet'}")
