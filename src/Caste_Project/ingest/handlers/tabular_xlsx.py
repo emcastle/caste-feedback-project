@@ -21,7 +21,7 @@ class ExcelReadConfig:
     na_values: Optional[List[str]] = None
     make_row_text: bool = True
     row_text_max_chars: int = 20000              # safety cap
-    engine_xlsx: str = "openpyxl"                # approved in your env
+    engine_xlsx: str = "openpyxl"                # approved in env
 
 
 def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
@@ -68,7 +68,7 @@ def _read_excel_all_sheets(path: Path, cfg: ExcelReadConfig) -> Dict[str, pd.Dat
         engine = cfg.engine_xlsx
     elif suffix == ".xls":
         # .xls requires xlrd (not always available). We fail with a clear message.
-        # If you later add xlrd to environment.yml, you can set engine="xlrd" here.
+        # If later add xlrd to environment.yml, can set engine="xlrd" here.
         raise RuntimeError(
             "Reading .xls requires the 'xlrd' engine which is not installed. "
             "Either convert to .xlsx or add xlrd to environment.yml (if available in Nexus)."

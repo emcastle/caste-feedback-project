@@ -26,7 +26,7 @@ class PptxSegmentConfig:
       - pptx_entries.parquet
     """
     include_ocr_text: bool = True
-    include_notes: bool = True  # if you store notes as blocks
+    include_notes: bool = True  # store notes as blocks
     min_entry_chars: int = 30
     dedupe: bool = True
 
@@ -113,7 +113,7 @@ def segment_pptx_blocks_to_entries(
         # Only add OCR when it has content, and keep it labeled so it's debuggable
         df["_txt"] = df["_txt"] + ocr_piece.apply(lambda s: f"\n[OCR]\n{s}" if s.strip() else "")
 
-    # Optionally include notes if your ingest stores them as blocks (you can detect by block_type)
+    # Optionally include notes if ingest stores them as blocks ( can detect by block_type)
     if not cfg.include_notes and block_type_col:
         df = df[~df[block_type_col].astype(str).str.lower().str.contains("notes", na=False)].copy()
 

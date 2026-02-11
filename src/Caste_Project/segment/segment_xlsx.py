@@ -76,7 +76,7 @@ def segment_xlsx_rows_to_entries(
     if "doc_id" not in df.columns:
         raise KeyError("excel_rows.parquet must contain a 'doc_id' column.")
 
-    # Common columns emitted by your excel ingest
+    # Common columns emitted by excel ingest
     row_num_col = _pick_first_present(df, ["row_num", "record_num", "idx", "index"])
     row_text_col = _pick_first_present(df, ["row_text", "record_text", "text"])
     sheet_col = _pick_first_present(df, ["sheet_name", "sheet", "tab", "worksheet"])

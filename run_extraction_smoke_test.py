@@ -32,7 +32,7 @@ from Caste_Project.ingest.discover import build_manifest
 from Caste_Project.ingest.handlers.document_pdf import pdf_extract_to_relational
 from Caste_Project.ingest.handlers.document_docx import extract_docx_to_relational
 from Caste_Project.ingest.handlers.tabular_csv import extract_csv_to_relational
-from Caste_Project.ingest.handlers.tabular_excel import extract_excel_to_relational
+from Caste_Project.ingest.handlers.tabular_xlsx import extract_excel_to_relational
 from Caste_Project.ingest.handlers.structured_json import extract_json_to_relational
 from Caste_Project.ingest.handlers.document_txt import extract_txt_to_relational
 from Caste_Project.ingest.handlers.presentation_pptx import extract_pptx_to_relational, PptxReadConfig

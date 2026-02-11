@@ -11,10 +11,11 @@ This project uses a **Conda environment** (not `python -m venv`) and is designed
 0. Need to confirm that parse_pdf correctly parses title for CQAS and metadata, need more test files that include CQAS in the title added to test input
 1. fix parse_csv, issue is as follows: " because one whole csv may be the feedback from one person, the columns and rows are not things that can be matched to others because they are extremely specific. In the test examples cols are as follows..."
       this is creating too many entry_num when the whole file is just from one person/org.
+      this also applies to parse_xlsx
 2. orchestrator script now that most extension types are done 
 3. find data product(s) mentioned based on name (initially)
 4. find data product(s) mentioned based on characteristics/descriptions of the data products
-5. convert the timeline to code to then reference for temporabl analysis
+5. convert the timeline to code to then reference for temporal analysis
 
 
 

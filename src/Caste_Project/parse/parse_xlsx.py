@@ -33,7 +33,7 @@ class XlsxParseConfig:
     max_date_chars: int = 160
     max_feedback_chars: int = 80_000
 
-    # Column name hints (case-insensitive) you can extend later
+    # Column name hints (case-insensitive) can extend later
     date_col_hints: Tuple[str, ...] = ("date", "submitted", "timestamp", "created", "time")
     sender_col_hints: Tuple[str, ...] = ("sender", "from", "name", "requestor", "submitter", "contact")
     receiver_col_hints: Tuple[str, ...] = ("receiver", "to", "agency", "office", "recipient")
