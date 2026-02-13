@@ -1,0 +1,58 @@
+# config/products.yaml
+# Canonical product names + keyword/alias lists used for matching.
+# Keep canonical keys EXACTLY as you want them stored in your output table.
+
+products:
+  - name: "CQAS"
+    keywords:
+      - "CQAS"
+      - "Controlled Correspondence"
+
+  - name: "Crosswalk"
+    keywords:
+      - "Crosswalk"
+
+  - name: "DHC A"
+    keywords:
+      - "DHC A"
+      - "DHC_A"
+      - "Detailed Demographic Housing Characteristics"
+      - "Detailed Demographic and Housing Characteristics"
+      - "sex by age"
+      - "file A"
+
+  - name: "DHC B"
+    keywords:
+      - "DHC B"
+      - "DHC_B"
+      - "Detailed Demographic Housing Characteristics tenure"
+      - "Household tenure"
+      - "file B"
+
+  - name: "DHC"
+    keywords:
+      - "DHC"
+      - "Demographic Housing Characteristics"
+      - "Demographic and Housing Characteristics"
+
+  - name: "PL"
+    keywords:
+      - "PL"
+      - "Public Law 94-171"
+      - "Public Law"
+      - "voting rights"
+      - "Redistricting"
+
+  - name: "PPMF"
+    keywords:
+      - "PPMF"
+      - "Privacy-Protected Microdata"
+
+  - name: "Product S-DHC"
+    keywords:
+      - "DHC S"
+      - "Product S-DHC"
+      - "Supplemental DHC"
+      - "Household type"
+      - "Supplemental Demographic Housing Characteristics"
+      - "Supplemental Demographic and Housing Characteristics"

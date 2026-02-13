@@ -535,8 +535,6 @@ def main_cli() -> None:
 
     #wide_df, long_df = parse_csv_rows_to_fields(rows_df, documents_df, CsvParseConfig())
 
-    #wide_df.to_parquet(out_dir / "csv_entry_fields.parquet", index=False)
-    #long_df.to_parquet(out_dir / "csv_entry_fields_long.parquet", index=False)
     cfg = CsvParseConfig()
 
     if args.granularity == "document":
@@ -560,6 +558,8 @@ def main_cli() -> None:
         wide_df = pd.concat(wide_parts, ignore_index=True) if wide_parts else pd.DataFrame()
         long_df = pd.concat(long_parts, ignore_index=True) if long_parts else pd.DataFrame()
 
+    wide_df.to_parquet(out_dir / "csv_entry_fields.parquet", index=False)
+    long_df.to_parquet(out_dir / "csv_entry_fields_long.parquet", index=False)
 
     print(f"Saved: {out_dir / 'csv_entry_fields.parquet'}")
     print(f"Saved: {out_dir / 'csv_entry_fields_long.parquet'}")
