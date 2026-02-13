@@ -1,0 +1,171 @@
+# config/themes.yaml
+# Baseline theme taxonomy (seeded from a single CSV).
+# Intent: provide a starting controlled vocabulary + matching hints.
+# You can expand this as you process more files.
+
+version: 0.1
+notes:
+  - "Seed taxonomy from '2020 Data Products Feedback_CQAS Numbers Committee Crosswalk_03 28 2025'; expect expansion after processing additional files."
+  - "Use as canonical theme names for rollups. Keep names stable once reporting begins."
+
+themes:
+  - id: "out_of_scope"
+    name: "Out of scope"
+    description: "Feedback that does not apply to the decennial data products or is unrelated to the requested scope."
+    examples:
+      - "Not related to 2020 DHC/PL/PPMF outputs."
+      - "This is outside the scope of these products."
+    keywords:
+      - "out of scope"
+      - "not applicable"
+      - "irrelevant"
+      - "unrelated"
+
+  - id: "other_census_programs"
+    name: "Other Census programs (ACS, CPS, PEP)"
+    description: "Feedback primarily about non-decennial programs such as ACS, CPS, PEP, or similar Census programs."
+    examples:
+      - "This issue is really about ACS."
+      - "CPS weighting needs..."
+      - "PEP estimates..."
+    keywords:
+      - "ACS"
+      - "American Community Survey"
+      - "CPS"
+      - "Current Population Survey"
+      - "PEP"
+      - "Population Estimates Program"
+
+  - id: "maintain_detail_characteristics_geography"
+    name: "Maintain current detailed characteristics and geography"
+    description: "Requests or support for keeping the current level of detail in characteristics and geographic granularity in decennial products."
+    examples:
+      - "Please maintain the same detailed breakdowns."
+      - "Do not reduce geographic detail."
+    keywords:
+      - "maintain"
+      - "keep"
+      - "preserve"
+      - "detailed characteristics"
+      - "geography"
+      - "geographic detail"
+      - "granularity"
+
+  - id: "programmatic_uses"
+    name: "Programmatic uses of decennial data"
+    description: "Use cases describing program administration or implementation relying on decennial data."
+    examples:
+      - "Used to administer programs."
+      - "Program eligibility calculations."
+    keywords:
+      - "programmatic"
+      - "program administration"
+      - "eligibility"
+      - "allocation"
+      - "funding formula"
+
+  - id: "legal_uses"
+    name: "Legal uses of decennial data"
+    description: "Feedback describing legal, statutory, regulatory, compliance, or litigation uses of decennial data."
+    examples:
+      - "Used for compliance with legal requirements."
+      - "Used in litigation."
+    keywords:
+      - "legal"
+      - "statute"
+      - "statutory"
+      - "regulation"
+      - "regulatory"
+      - "compliance"
+      - "litigation"
+      - "court"
+      - "Voting Rights Act"
+
+  - id: "denominators_for_statistics"
+    name: "Decennial data used as denominators for critical statistics"
+    description: "Decennial population counts used as denominators for rates and other derived statistics (e.g., per-capita rates)."
+    examples:
+      - "Used as denominators for mortality rates."
+      - "Per-capita calculations."
+    keywords:
+      - "denominator"
+      - "per capita"
+      - "rate"
+      - "incidence"
+      - "prevalence"
+
+  - id: "unique_use_case_provided"
+    name: "Unique use case provided"
+    description: "A distinct or uncommon use of decennial data described by the submitter that does not fit other categories."
+    examples:
+      - "A niche research or operational use case."
+      - "A specialized application of decennial tables."
+    keywords:
+      - "unique"
+      - "specialized"
+      - "specific use"
+      - "novel use"
+
+  - id: "downstream_data_production"
+    name: "Decennial data used for downstream data production"
+    description: "Decennial data used to produce other datasets or inputs (e.g., population estimates, survey weighting)."
+    examples:
+      - "Used to create population estimates."
+      - "Used for weighting surveys."
+    keywords:
+      - "downstream"
+      - "population estimates"
+      - "estimate"
+      - "PEP"
+      - "weighting"
+      - "survey weights"
+      - "benchmark"
+      - "controls"
+
+  - id: "differential_privacy_concerns_or_opposition"
+    name: "Concerns or opposition to differential privacy"
+    description: "Concerns about adopting differential privacy (DP) or opposition to DP use in decennial products."
+    examples:
+      - "Concerned DP will reduce accuracy."
+      - "Opposed to DP."
+    keywords:
+      - "differential privacy"
+      - "DP"
+      - "privacy noise"
+      - "noise infusion"
+      - "introducing differential privacy"
+      - "oppose"
+      - "opposition"
+      - "concern"
+
+  - id: "requests_add_products_or_tables"
+    name: "Requests for adding data products or tables"
+    description: "Requests to add new products, tables, tabulations, or additional outputs."
+    examples:
+      - "Add a new table for..."
+      - "Need additional breakdowns."
+    keywords:
+      - "add"
+      - "additional"
+      - "new table"
+      - "new tables"
+      - "new product"
+      - "include"
+      - "request"
+      - "more tables"
+      - "more detail"
+
+  - id: "support_differential_privacy"
+    name: "Support for adopting differential privacy"
+    description: "Explicit support for adopting differential privacy in decennial products."
+    examples:
+      - "Support the use of DP."
+      - "DP is necessary for privacy protection."
+    keywords:
+      - "support"
+      - "in favor"
+      - "favorable"
+      - "adopt differential privacy"
+      - "differential privacy"
+      - "DP"
+      - "privacy protection"
