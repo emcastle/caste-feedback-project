@@ -1,0 +1,109 @@
+# config/models.yaml
+# Central runtime + model configuration for the feedback NLP pipeline.
+
+version: 0.1
+
+paths:
+  # Project-relative paths (resolve relative to repo root / Feedback_Caste)
+  data_dir: "data"
+  outputs_dir: "outputs"
+  logs_dir: "outputs/logs"
+
+  # Vector index persistence (if using local stores)
+  vectorstore_dir: "outputs/vectorstore"
+
+  # Prompt templates
+  prompts_dir: "prompts"
+
+runtime:
+  seed: 42
+
+  # Concurrency for batch processing (tune based on rate limits + hardware)
+  max_workers: 6
+
+  # Checkpointing
+  checkpoint_every_n_entries: 50
+
+  # Skip work if text hash unchanged and outputs exist
+  enable_cache: true
+
+preprocess:
+  # If you already have clean text, you can disable or simplify this stage.
+  fix_text_encoding: true      # ftfy-like behavior
+  normalize_whitespace: true
+  strip_control_chars: true
+  lowercase: false             # keep false to preserve acronyms like DHC/PL
+  language_detection: true
+  default_language: "en"
+
+chunking:
+  # Token-based chunking is strongly recommended for LLM/RAG stability.
+  unit: "tokens"              # tokens | chars
+  chunk_size: 500             # target tokens per chunk
+  chunk_overlap: 75           # overlap tokens
+  min_chunk_size: 120         # avoid tiny fragments
+  respect_paragraphs: true    # split on blank lines when possible
+
+embeddings:
+  provider: "sentence_transformers"   # sentence_transformers | openai | other
+  model: "all-MiniLM-L6-v2"
+  batch_size: 64
+  normalize_embeddings: true
+
+vectorstore:
+  type: "faiss"               # faiss | chroma | pgvector | qdrant
+  persist: true
+  index_name: "feedback_chunks"
+  distance_metric: "cosine"   # cosine | l2 | ip
+
+retrieval:
+  # Entry-level RAG: primarily ground in the entry’s own chunks.
+  entry_top_k: 6
+  entry_use_same_entry_first: true
+  entry_same_entry_k: 6
+  entry_same_product_extra_k: 3
+
+  # Product-level RAG: retrieve more + diversify across entries
+  product_top_k: 20
+  diversify_by_entry: true
+  max_chunks_per_entry: 3
+
+llm:
+  provider: "openai"          # openai | azure_openai | local
+  # Model names are placeholders—set to whatever you actually use.
+  model_extract: "gpt-4.1-mini"
+  model_rag: "gpt-4.1"
+  temperature_extract: 0.1
+  temperature_rag: 0.2
+  max_output_tokens_extract: 900
+  max_output_tokens_rag: 800
+
+  # If your client supports it, enforce JSON outputs for extraction.
+  response_format: "json"     # json | text
+
+prompts:
+  extract_entry: "extract_entry_v1.txt"
+  rag_entry_summary: "rag_entry_summary_v1.txt"
+  rag_product_summary: "rag_product_summary_v1.txt"
+
+batching:
+  # LLM call behavior
+  max_retries: 5
+  initial_backoff_seconds: 1
+  max_backoff_seconds: 30
+  timeout_seconds: 90
+
+outputs:
+  # Suggested parquet outputs; adjust to your database approach if needed.
+  entry_nlp: "outputs/entry_nlp.parquet"
+  chunks: "outputs/chunks.parquet"
+  product_nlp: "outputs/product_nlp.parquet"
+
+schema:
+  # Column names expected in your ingested table.
+  entry_id_col: "entry_id"
+  product_col: "product"
+  text_col: "text_raw"
+  themes_col: "theme(s)"   # set to your actual column name; ok if missing
+  date_col: "date"         # optional
+  source_file_col: "source_file"  # optional
