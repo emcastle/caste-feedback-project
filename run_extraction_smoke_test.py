@@ -41,6 +41,8 @@ from Caste_Project.ingest.handlers.presentation_pptx import extract_pptx_to_rela
 def _pick_files(manifest: pd.DataFrame, ext: str, limit: int | None = None) -> pd.DataFrame:
     ext = ext.lower()
     m = manifest[manifest["ext"].str.lower() == ext].copy()
+    # skip Excel lock/temp files
+    m = m[~m["rel_path"].astype(str).str.contains(r"\\~\$|/~\$", regex=True)]
     if limit is not None:
         m = m.head(limit)
     return m
