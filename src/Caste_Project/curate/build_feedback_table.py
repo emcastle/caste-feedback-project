@@ -147,7 +147,6 @@ def build_feedback_table(parse_out_dir: Path, out_path: Path) -> pd.DataFrame:
     sources = [
         ("csv", parse_out_dir / "csv_entry_fields.parquet"),
         ("xlsx", parse_out_dir / "excel_entry_fields.parquet"),
-        # Add these as you confirm filenames in your repo:
         ("pdf", parse_out_dir / "pdf_entry_fields.parquet"),
         ("docx", parse_out_dir / "docx_entry_fields.parquet"),
         ("pptx", parse_out_dir / "pptx_entry_fields.parquet"),
