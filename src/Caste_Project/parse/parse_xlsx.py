@@ -464,30 +464,297 @@ def parse_xlsx_rows_to_fields(
 
     return wide_df, long_df
 
+def parse_xlsx_sheets_to_fields(
+    rows_df: pd.DataFrame,
+    documents_df: Optional[pd.DataFrame] = None,
+    cfg: XlsxParseConfig = XlsxParseConfig(),
+    entry_type: str = "document",
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Document-level parse for XLSX:
+      - One (doc_id, sheet_name) => one entry (entry_num=0 within that sheet group)
+      - feedback_text is concatenation of row text in row_num order
+    """
+    required = {"doc_id"}
+    missing = required - set(rows_df.columns)
+    if missing:
+        raise ValueError(f"rows_df missing required cols: {sorted(missing)}")
+
+    df = _ensure_row_num(rows_df).copy()
+
+    # Ensure sheet_name exists (ingest should provide it; if not, treat as single sheet)
+    if "sheet_name" not in df.columns:
+        df["sheet_name"] = None
+
+    # Attach filename/path if available
+    if documents_df is not None and "source_file" in documents_df.columns:
+        df = df.merge(
+            documents_df[["doc_id", "source_file", "source_rel_path"]].drop_duplicates("doc_id"),
+            on="doc_id",
+            how="left",
+        )
+    else:
+        if "source_file" not in df.columns:
+            df["source_file"] = None
+        if "source_rel_path" not in df.columns:
+            df["source_rel_path"] = None
+
+    wide_rows: List[Dict] = []
+    long_rows: List[Dict] = []
+
+    group_cols = ["doc_id", "sheet_name"]
+
+    for (doc_id, sheet_name), g in df.groupby(group_cols, sort=False, dropna=False):
+        g = g.sort_values("row_num", kind="stable")
+        r0 = g.iloc[0]
+        file_defaults = _file_level_defaults_from_row(r0)
+
+        # Determine hint columns within this sheet (more accurate than global)
+        cols = [c for c in g.columns if c not in (
+            "doc_id", "sheet_name", "row_num", "entry_num", "error", "source_file", "source_rel_path"
+        )]
+        date_col = _pick_first_matching_col(cols, cfg.date_col_hints)
+        sender_col = _pick_first_matching_col(cols, cfg.sender_col_hints)
+        receiver_col = _pick_first_matching_col(cols, cfg.receiver_col_hints)
+        subject_col = _pick_first_matching_col(cols, cfg.subject_col_hints)
+        feedback_col = _pick_first_matching_col(cols, cfg.feedback_col_hints)
+
+        if cfg.enable_best_text_col_fallback and feedback_col is None:
+            feedback_col = _pick_best_text_col_by_length(
+                g,
+                exclude=set(["doc_id", "sheet_name", "row_num", "entry_num", "error", "source_file", "source_rel_path"]),
+            )
+
+        # Build document text by concatenating all rows
+        texts: List[str] = []
+        for _, r in g.iterrows():
+            fb = _best_text_from_columns(r, feedback_col)
+            if fb:
+                texts.append(fb)
+            else:
+                rt = _safe_str(r.get("row_text")) or _safe_str(r.get("entry_text"))
+                texts.append(rt if rt else _make_feedback_text(r))
+
+        feedback_text = "\n".join([t for t in texts if t.strip()])
+        feedback_text = feedback_text[: cfg.max_feedback_chars] if feedback_text else ""
+
+        cqas_ids = _all_cqas_ids(feedback_text)
+        cqas_id = cqas_ids[0] if cqas_ids else None
+
+        # Best-effort metadata: first non-empty in hinted columns across rows
+        sender: Optional[str] = None
+        receiver: Optional[str] = None
+        subject: Optional[str] = None
+        date: Optional[str] = None
+
+        if sender_col and sender_col in g.columns:
+            s = g[sender_col].fillna("").astype(str).str.strip()
+            sender = s[s != ""].iloc[0] if (s != "").any() else None
+        if receiver_col and receiver_col in g.columns:
+            s = g[receiver_col].fillna("").astype(str).str.strip()
+            receiver = s[s != ""].iloc[0] if (s != "").any() else None
+        if subject_col and subject_col in g.columns:
+            s = g[subject_col].fillna("").astype(str).str.strip()
+            subject = s[s != ""].iloc[0] if (s != "").any() else None
+        if date_col and date_col in g.columns:
+            s = g[date_col].fillna("").astype(str).str.strip()
+            date = s[s != ""].iloc[0] if (s != "").any() else None
+
+        # Filename defaults
+        if not sender:
+            sender = file_defaults.get("file_sender")
+        if not subject:
+            subject = file_defaults.get("file_subject")
+        if not date:
+            date = file_defaults.get("file_date")
+
+        # Last resort: scan doc text for date
+        if not date and feedback_text:
+            m = RE_DATE_TEXT.search(feedback_text)
+            if m:
+                date = m.group(1).strip()
+
+        # caps
+        if sender:
+            sender = str(sender)[: cfg.max_sender_chars]
+        if receiver:
+            receiver = str(receiver)[: cfg.max_receiver_chars]
+        if subject:
+            subject = str(subject)[: cfg.max_subject_chars]
+        if date:
+            date = str(date)[: cfg.max_date_chars]
+
+        wide = {
+            "doc_id": doc_id,
+            "sheet_name": sheet_name,
+            "entry_num": 0,
+            "row_num": 0,
+            "source_file": r0.get("source_file"),
+            "source_rel_path": r0.get("source_rel_path"),
+            "file_sender": file_defaults.get("file_sender"),
+            "file_subject": file_defaults.get("file_subject"),
+            "file_date": file_defaults.get("file_date"),
+            "entry_type": entry_type,
+            "cqas_id": cqas_id,
+            "cqas_ids_json": json.dumps(cqas_ids, ensure_ascii=False),
+            "sender": sender,
+            "receiver": receiver,
+            "date": date,
+            "subject": subject,
+            "feedback_text": feedback_text,
+            "raw_rows_json": json.dumps(
+                [{k: (None if pd.isna(v) else v) for k, v in r.items()} for _, r in g.iterrows()],
+                ensure_ascii=False,
+                default=str,
+            ),
+            "error": None,
+        }
+        wide_rows.append(wide)
+
+        def emit(field_name: str, field_value: Optional[str]) -> None:
+            long_rows.append(
+                {
+                    "doc_id": doc_id,
+                    "sheet_name": sheet_name,
+                    "entry_num": 0,
+                    "field_name": field_name,
+                    "field_value": field_value,
+                }
+            )
+
+        emit("entry_type", entry_type)
+        emit("cqas_id", cqas_id)
+        emit("sender", sender)
+        emit("receiver", receiver)
+        emit("date", date)
+        emit("subject", subject)
+        emit("feedback_text", feedback_text)
+
+    wide_df = pd.DataFrame(wide_rows)
+    long_df = pd.DataFrame(long_rows)
+
+    if not wide_df.empty:
+        wide_df = wide_df.sort_values(["doc_id", "sheet_name", "entry_num"]).reset_index(drop=True)
+    if not long_df.empty:
+        long_df = long_df.sort_values(["doc_id", "sheet_name", "entry_num", "field_name"]).reset_index(drop=True)
+
+    return wide_df, long_df
+
+
+def _norm(s: str) -> str:
+    return (s or "").strip().lower()
+
+
+def _has_any_col(columns: List[str], tokens: List[str]) -> bool:
+    cols = [_norm(c) for c in columns]
+    for t in tokens:
+        tt = t.lower()
+        if any(tt in c for c in cols):
+            return True
+    return False
+
+
+def _nunique_nonempty(series: pd.Series) -> int:
+    s = series.fillna("").astype(str).str.strip()
+    s = s[s != ""]
+    return int(s.nunique()) if not s.empty else 0
+
+
+def _should_parse_sheet_as_rows(df: pd.DataFrame, cfg: XlsxParseConfig) -> bool:
+    cols = list(df.columns)
+
+    # Marker columns
+    has_cqas = _has_any_col(cols, ["cqas", "cqas number"])
+    has_submitter_identity = (
+        _has_any_col(cols, ["submitter first", "submitter last", "submitter", "sender"])
+        and _has_any_col(cols, ["organization", "email", "name", "contact"])
+    )
+
+    if not (has_cqas or has_submitter_identity):
+        return False
+
+    # Evidence of multiple records
+    if has_cqas:
+        cqas_col = next((c for c in cols if "cqas" in _norm(c)), None)
+        if cqas_col is not None and _nunique_nonempty(df[cqas_col]) >= 3:
+            return True
+
+    email_col = next((c for c in cols if "email" in _norm(c)), None)
+    if email_col is not None and _nunique_nonempty(df[email_col]) >= 3:
+        return True
+
+    fb_col = _pick_first_matching_col(cols, cfg.feedback_col_hints)
+    if fb_col and fb_col in df.columns:
+        nonempty_fb = (df[fb_col].fillna("").astype(str).str.strip() != "").sum()
+        if nonempty_fb >= 5:
+            return True
+
+    return False
+
+
+def _is_likely_summary_sheet(df: pd.DataFrame, cfg: XlsxParseConfig) -> bool:
+    cols = list(df.columns)
+
+    # Guardrail: narrative text anywhere => not summary
+    for v in df.fillna("").astype(str).to_numpy().ravel():
+        s = str(v).strip()
+        if len(s) >= 200:
+            return False
+
+    # If a feedback-like column exists and has any content => not summary
+    fb_col = _pick_first_matching_col(cols, cfg.feedback_col_hints)
+    if fb_col and fb_col in df.columns:
+        nonempty_fb = (df[fb_col].fillna("").astype(str).str.strip() != "").sum()
+        if nonempty_fb >= 1:
+            return False
+
+    agg_header = _has_any_col(cols, ["count", "total", "percent", "%", "frequency", "sum", "avg", "mean"])
+
+    tmp = df.fillna("")
+    numeric_like = 0
+    nonempty = 0
+    lengths: List[int] = []
+
+    for v in tmp.to_numpy().ravel():
+        s = str(v).strip()
+        if not s:
+            continue
+        nonempty += 1
+        lengths.append(len(s))
+        try:
+            float(s.replace(",", ""))
+            numeric_like += 1
+        except Exception:
+            pass
+
+    pct_numeric = (numeric_like / nonempty) if nonempty else 0.0
+    med_len = sorted(lengths)[len(lengths) // 2] if lengths else 0
+
+    if agg_header and not fb_col:
+        return True
+
+    if nonempty >= 50 and pct_numeric > 0.70 and med_len < 25:
+        return True
+
+    return False
+
+
+
 
 # -----------------------------
 # CLI
 # -----------------------------
 def main_cli() -> None:
-    """
-    Usage examples:
-
-      # Parse directly from ingest rows:
-      conda run -n feedback python -m Caste_Project.parse.parse_xlsx --in_dir data\\_test_output --out_dir data\\_parse_output
-
-      # Parse from segmented entries:
-      conda run -n feedback python -m Caste_Project.parse.parse_xlsx --in_dir data\\_seg_output --rows_name excel_entries.parquet --out_dir data\\_parse_output --docs_dir data\\_test_output
-
-    Expects (default):
-      in_dir/excel_rows.parquet
-      docs_dir/excel_documents.parquet (recommended)
-    """
     ap = argparse.ArgumentParser()
     ap.add_argument("--in_dir", required=True)
     ap.add_argument("--out_dir", required=True)
     ap.add_argument("--rows_name", default="excel_rows.parquet")
     ap.add_argument("--docs_dir", required=False, help="Folder containing excel_documents.parquet (recommended)")
     ap.add_argument("--documents_name", default="excel_documents.parquet")
+
+    ap.add_argument("--granularity", choices=["row", "document", "auto"], default="auto")
+    ap.add_argument("--keep_summaries", action="store_true")
+
     args = ap.parse_args()
 
     in_dir = Path(args.in_dir)
@@ -497,7 +764,6 @@ def main_cli() -> None:
     rows_path = in_dir / args.rows_name
     if not rows_path.exists():
         raise FileNotFoundError(f"Missing {rows_path}. Pass --rows_name if different.")
-
     rows_df = pd.read_parquet(rows_path)
 
     documents_df = None
@@ -506,7 +772,57 @@ def main_cli() -> None:
         if docs_path.exists():
             documents_df = pd.read_parquet(docs_path)
 
-    wide_df, long_df = parse_xlsx_rows_to_fields(rows_df, documents_df, XlsxParseConfig())
+    cfg = XlsxParseConfig()
+
+    if args.granularity == "row":
+        wide_df, long_df = parse_xlsx_rows_to_fields(rows_df, documents_df, cfg)
+
+    elif args.granularity == "document":
+        # one entry per (doc_id, sheet_name)
+        wide_df, long_df = parse_xlsx_sheets_to_fields(rows_df, documents_df, cfg, entry_type="document")
+
+    else:
+        # AUTO: decide per (doc_id, sheet_name)
+        df = _ensure_row_num(rows_df).copy()
+        if "sheet_name" not in df.columns:
+            df["sheet_name"] = None
+
+        wide_parts: List[pd.DataFrame] = []
+        long_parts: List[pd.DataFrame] = []
+
+        for (doc_id, sheet_name), g in df.groupby(["doc_id", "sheet_name"], sort=False, dropna=False):
+            g = g.copy()
+
+            # 1) summary?
+            if _is_likely_summary_sheet(g, cfg):
+                if not args.keep_summaries:
+                    continue
+                w, l = parse_xlsx_sheets_to_fields(g, documents_df, cfg, entry_type="summary_sheet")
+                if not w.empty:
+                    w["parse_reason"] = "summary_detected"
+                if not l.empty:
+                    l.loc[l["field_name"] == "entry_type", "field_value"] = "summary_sheet"
+                wide_parts.append(w)
+                long_parts.append(l)
+                continue
+
+            # 2) multi-entry?
+            if _should_parse_sheet_as_rows(g, cfg):
+                w, l = parse_xlsx_rows_to_fields(g, documents_df, cfg)
+                if not w.empty:
+                    w["parse_reason"] = "multi_entry_markers"
+                wide_parts.append(w)
+                long_parts.append(l)
+            else:
+                # 3) default document
+                w, l = parse_xlsx_sheets_to_fields(g, documents_df, cfg, entry_type="document")
+                if not w.empty:
+                    w["parse_reason"] = "default_document"
+                wide_parts.append(w)
+                long_parts.append(l)
+
+        wide_df = pd.concat(wide_parts, ignore_index=True) if wide_parts else pd.DataFrame()
+        long_df = pd.concat(long_parts, ignore_index=True) if long_parts else pd.DataFrame()
 
     wide_df.to_parquet(out_dir / "excel_entry_fields.parquet", index=False)
     long_df.to_parquet(out_dir / "excel_entry_fields_long.parquet", index=False)
@@ -514,10 +830,11 @@ def main_cli() -> None:
     print(f"Saved: {out_dir / 'excel_entry_fields.parquet'}")
     print(f"Saved: {out_dir / 'excel_entry_fields_long.parquet'}")
 
-    cols = ["doc_id", "entry_num", "sender", "date", "subject", "cqas_id"]
+    cols = ["doc_id", "sheet_name", "entry_num", "entry_type", "parse_reason", "sender", "date", "subject", "cqas_id"]
     cols = [c for c in cols if c in wide_df.columns]
     print("\nParse quick checks (head):")
-    print(wide_df[cols].head(25).to_string(index=False))
+    if not wide_df.empty and cols:
+        print(wide_df[cols].head(25).to_string(index=False))
 
 
 if __name__ == "__main__":
