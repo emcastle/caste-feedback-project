@@ -1,3 +1,11 @@
+"""
+Docstring for run_pipeline_chunked
+
+to run: (ensure feedback is activated )
+    $env:PYTHONUNBUFFERED="1"; python -u run_pipeline_chunked.py --root "data\_nearly_full_input\Master_Data" --stage_out "data\_stage_master" --parse_out "data\_parse_master" --final_out "data\_final_master" --chunk_size 10
+
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -303,6 +311,11 @@ def main() -> None:
         _run_subprocess(["conda", "run", "-n", "feedback", "python", "-m", "Caste_Project.segment.segment_xlsx",
                          "--in_dir", str(stage_out), "--out_dir", str(stage_out)])
 
+    if(stage_out / "pdf_documents.parquet").exists() and (stage_out / "pdf_entries.parquet").exists():
+        _run_subprocess(["conda", "run", "-n", "feedback", "python", "-m", "Caste_Project.segment.segment_pdf",
+                         "--in_dir", str(stage_out), "--out_dir", str(stage_out)])
+    if(stage_out / "docx_")
+
     # ---- PARSE ----
     # CSV parse (expects csv_entries.parquet by default in --in_dir)
     if (stage_out / "csv_entries.parquet").exists():
@@ -313,7 +326,7 @@ def main() -> None:
                          "--granularity", "auto",
                          "--keep_summaries"])
 
-    # XLSX parse (we parse from excel_rows.parquet; your parse_xlsx supports this)
+    # XLSX parse (we parse from excel_rows.parquet; parse_xlsx supports this)
     if (stage_out / "excel_rows.parquet").exists():
         _run_subprocess(["conda", "run", "-n", "feedback", "python", "-m", "Caste_Project.parse.parse_xlsx",
                          "--in_dir", str(stage_out),
@@ -324,12 +337,38 @@ def main() -> None:
                          "--granularity", "auto",
                          "--keep_summaries"])
 
-    # Add other parse modules here if you have them; example pattern:
-    # if (stage_out / "pdf_pages.parquet").exists():
-    #     _run_subprocess([... "Caste_Project.parse.parse_pdf", ...])
+    # PDF parse 
+    if(stage_out / "pdf_pages.parquet").exists():
+        _run_subprocess(["conda", "run", "-n", "feedback", "-m", "Caste_Project.parse.parse_pdf",
+                         "--in_dir", str(stage_out),
+                         "--out_dir", str(parse_out),
+                         "--docs_dir", str(stage_out)])
+    
+    # docx parse 
+    if(stage_out / "docx_blocks.parquet").exists():
+        _run_subprocess(["conda", "run", "-n", "feedback", "-m", "Caste_Project.parse.parse_docx",
+                         "--in_dir", str(stage_out),
+                         "--out_dir", str(parse_out),
+                         "--docs_dir", str(stage_out)])
+    
+    # pptx parse 
+    if(stage_out / "pptx_blocks.parquet").exists():
+        _run_subprocess(["conda", "run", "-n", "feedback", "-m", "Caste_Project.parse.parse_pptx",
+                         "--in_dir", str(stage_out),
+                         "--out_dir", str(parse_out),
+                         "--docs_dir", str(stage_out),
+                         "--strip_anchor_lines"])
+        
+    # json parse
+    if(stage_out / "json_records.parquet").exists():
+        _run_subprocess(["conda", "run", "-n", "feedback", "-m", "Caste_Project.parse.parse_json",
+                         "--in_dir", str(stage_out),
+                         "--out_dir", str(parse_out),
+                         "--docs_dir", str(stage_out)])
+
 
     # ---- CONSOLIDATE ----
-    # Assumes you created Caste_Project.curate.build_feedback_table
+    # created Caste_Project.curate.build_feedback_table
     _run_subprocess(["conda", "run", "-n", "feedback", "python", "-m", "Caste_Project.curate.build_feedback_table",
                      "--parse_out_dir", str(parse_out),
                      "--out_path", str(final_out / "feedback_entries.parquet")])
