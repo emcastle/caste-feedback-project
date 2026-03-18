@@ -288,6 +288,9 @@ def main() -> None:
         default=".csv,.xlsx,.pdf,.docx,.json,.txt,.pptx",
         help="Comma-separated list of extensions, e.g. .csv,.xlsx",
     )
+    ap.add_argument("--skip_ingest", action="store_true", help="Skip ingest step")
+    ap.add_argument("--skip_segment", action="store_true", help="Skip segment step")
+    ap.add_argument("--skip_parse", action="store_true", help="Skip parse step")
     args = ap.parse_args()
 
     root = Path(args.root).resolve()
@@ -298,77 +301,189 @@ def main() -> None:
     final_out.mkdir(parents=True, exist_ok=True)
 
     exts = [e.strip() for e in args.types.split(",") if e.strip()]
-    ingest_in_chunks(root, stage_out, exts=exts, chunk_size=args.chunk_size, limit_total=args.limit_total)
+    # ingest_in_chunks(root, stage_out, exts=exts, chunk_size=args.chunk_size, limit_total=args.limit_total)
+
+    if not args.skip_ingest:
+        print("\n== INGEST ===")
+        ingest_in_chunks(root, stage_out, exts=exts, chunk_size=args.chunk_size, limit_total=args.limit_total)
+    else:
+        print("\n== SKIPPING INGEST ===")
 
     # ---- SEGMENT ----
     # Segmenters generally expect the ingest outputs in stage_out.
     # Only run if the expected inputs exist.
+    """
+    # csv segment
     if (stage_out / "csv_documents.parquet").exists() and (stage_out / "csv_rows.parquet").exists():
         _run_subprocess(["conda", "run", "-n", "feedback", "python", "-m", "Caste_Project.segment.segment_csv",
                          "--in_dir", str(stage_out), "--out_dir", str(stage_out)])
 
+    # xlsx (excel) segment
     if (stage_out / "excel_documents.parquet").exists() and (stage_out / "excel_rows.parquet").exists():
         _run_subprocess(["conda", "run", "-n", "feedback", "python", "-m", "Caste_Project.segment.segment_xlsx",
                          "--in_dir", str(stage_out), "--out_dir", str(stage_out)])
 
+    # pdf segment
     if(stage_out / "pdf_documents.parquet").exists() and (stage_out / "pdf_entries.parquet").exists():
         _run_subprocess(["conda", "run", "-n", "feedback", "python", "-m", "Caste_Project.segment.segment_pdf",
                          "--in_dir", str(stage_out), "--out_dir", str(stage_out)])
-    if(stage_out / "docx_")
+        
+    # docx segment
+    if(stage_out / "docx_documents.parquet").exists() and (stage_out / "docx_entries.parquet").exists():
+        _run_subprocess(["conda", "run", "-n", "feedback", "python", "-m", "Caste_Project.segment.segment_docx",
+                         "--in_dir", str(stage_out), "--out_dir", str(stage_out)])
+    
+    # json segment
+    if(stage_out / "json_documents.parquet").exists() and (stage_out / "json_entries.parquet").exists():
+        _run_subprocess(["conda", "run", "-n", "feedback", "python", "-m", "Caste_Project.segment.segment_pptx",
+                         "--in_dir", str(stage_out), "--out_dir", str(stage_out)])
+        
+    # pptx segment
+    if(stage_out / "pptx_documents.parquet").exists() and (stage_out / "pptx_entries.parquet").exists():
+        _run_subprocess(["conda", "run", "-n", "feedback", "python", "-m", "Caste_Project.segment.segment_pptx",
+                         "--in_dir", str(stage_out), "--out_dir", str(stage_out)])
+    """
+
+    # ---- SEGMENT ----
+    # Segment ALL file types into entries
+    # wrap segment block 
+    if not args.skip_segment:
+        print("\n=== SEGMENT ===")
+        # CSV
+        if (stage_out / "csv_rows.parquet").exists():
+            _run_subprocess([
+                "conda", "run", "-n", "feedback", "python", "-m", "Caste_Project.segment.segment_csv",
+                "--in_dir", str(stage_out),
+                "--out_dir", str(stage_out)
+            ])
+
+        # XLSX
+        if (stage_out / "excel_rows.parquet").exists():
+            _run_subprocess([
+                "conda", "run", "-n", "feedback", "python", "-m", "Caste_Project.segment.segment_xlsx",
+                "--in_dir", str(stage_out),
+                "--out_dir", str(stage_out)
+            ])
+
+        # DOCX
+        if (stage_out / "docx_blocks.parquet").exists():
+            _run_subprocess([
+                "conda", "run", "-n", "feedback", "python", "-m", "Caste_Project.segment.segment_docx",
+                "--in_dir", str(stage_out),
+                "--out_dir", str(stage_out)
+            ])
+
+        # PDF
+        if (stage_out / "pdf_pages.parquet").exists():
+            _run_subprocess([
+                "conda", "run", "-n", "feedback", "python", "-m", "Caste_Project.segment.segment_pdf",
+                "--in_dir", str(stage_out),
+                "--out_dir", str(stage_out)
+            ])
+
+        # PPTX
+        if (stage_out / "pptx_blocks.parquet").exists():
+            _run_subprocess([
+                "conda", "run", "-n", "feedback", "python", "-m", "Caste_Project.segment.segment_pptx",
+                "--in_dir", str(stage_out),
+                "--out_dir", str(stage_out)
+            ])
+
+        # JSON
+        if (stage_out / "json_records.parquet").exists():
+            _run_subprocess([
+                "conda", "run", "-n", "feedback", "python", "-m", "Caste_Project.segment.segment_json",
+                "--in_dir", str(stage_out),
+                "--out_dir", str(stage_out)
+            ])
+    else: 
+        print("\n=== SKIPPING SEGMENT ===")
+
+    print("\n=== SEGMENT OUTPUT CHECK ===")
+    for f in [
+        "csv_entries.parquet",
+        "excel_entries.parquet",
+        "docx_entries.parquet",
+        "pdf_entries.parquet",
+        "pptx_entries.parquet",
+        "json_entries.parquet"
+    ]:
+        print(f, (stage_out / f).exists())
 
     # ---- PARSE ----
-    # CSV parse (expects csv_entries.parquet by default in --in_dir)
-    if (stage_out / "csv_entries.parquet").exists():
-        _run_subprocess(["conda", "run", "-n", "feedback", "python", "-m", "Caste_Project.parse.parse_csv",
-                         "--in_dir", str(stage_out),
-                         "--out_dir", str(parse_out),
-                         "--docs_dir", str(stage_out),
-                         "--granularity", "auto",
-                         "--keep_summaries"])
 
-    # XLSX parse (we parse from excel_rows.parquet; parse_xlsx supports this)
-    if (stage_out / "excel_rows.parquet").exists():
-        _run_subprocess(["conda", "run", "-n", "feedback", "python", "-m", "Caste_Project.parse.parse_xlsx",
-                         "--in_dir", str(stage_out),
-                         "--out_dir", str(parse_out),
-                         "--docs_dir", str(stage_out),
-                         "--rows_name", "excel_rows.parquet",
-                         "--documents_name", "excel_documents.parquet",
-                         "--granularity", "auto",
-                         "--keep_summaries"])
+    # wrap the parse 
+    if not args.skip_parse:
+        print("\n=== PARSE ===")
 
-    # PDF parse 
-    if(stage_out / "pdf_pages.parquet").exists():
-        _run_subprocess(["conda", "run", "-n", "feedback", "-m", "Caste_Project.parse.parse_pdf",
-                         "--in_dir", str(stage_out),
-                         "--out_dir", str(parse_out),
-                         "--docs_dir", str(stage_out)])
-    
-    # docx parse 
-    if(stage_out / "docx_blocks.parquet").exists():
-        _run_subprocess(["conda", "run", "-n", "feedback", "-m", "Caste_Project.parse.parse_docx",
-                         "--in_dir", str(stage_out),
-                         "--out_dir", str(parse_out),
-                         "--docs_dir", str(stage_out)])
-    
-    # pptx parse 
-    if(stage_out / "pptx_blocks.parquet").exists():
-        _run_subprocess(["conda", "run", "-n", "feedback", "-m", "Caste_Project.parse.parse_pptx",
-                         "--in_dir", str(stage_out),
-                         "--out_dir", str(parse_out),
-                         "--docs_dir", str(stage_out),
-                         "--strip_anchor_lines"])
+        # CSV parse (expects csv_entries.parquet by default in --in_dir)
+        if (stage_out / "csv_entries.parquet").exists():
+            _run_subprocess(["conda", "run", "-n", "feedback", "python", "-m", "Caste_Project.parse.parse_csv",
+                            "--in_dir", str(stage_out),
+                            "--out_dir", str(parse_out),
+                            "--docs_dir", str(stage_out),
+                            "--granularity", "auto",
+                            "--keep_summaries"])
+
+        # XLSX parse (we parse from excel_rows.parquet; parse_xlsx supports this)
+        # maybe the comment above is incorrect
+        if (stage_out / "excel_entries.parquet").exists():
+            _run_subprocess(["conda", "run", "-n", "feedback", "python", "-m", "Caste_Project.parse.parse_xlsx",
+                            "--in_dir", str(stage_out),
+                            "--out_dir", str(parse_out),
+                            "--docs_dir", str(stage_out),
+                            # "--rows_name", "excel_rows.parquet",
+                            "--documents_name", "excel_documents.parquet",
+                            "--granularity", "auto",
+                            "--keep_summaries"])
+
+        # PDF parse 
+        if(stage_out / "pdf_entries.parquet").exists():
+            _run_subprocess(["conda", "run", "-n", "feedback", "python","-m", "Caste_Project.parse.parse_pdf",
+                            "--in_dir", str(stage_out),
+                            "--out_dir", str(parse_out),
+                            "--docs_dir", str(stage_out)])
         
-    # json parse
-    if(stage_out / "json_records.parquet").exists():
-        _run_subprocess(["conda", "run", "-n", "feedback", "-m", "Caste_Project.parse.parse_json",
-                         "--in_dir", str(stage_out),
-                         "--out_dir", str(parse_out),
-                         "--docs_dir", str(stage_out)])
+        # docx parse 
+        if(stage_out / "docx_entries.parquet").exists():
+            _run_subprocess(["conda", "run", "-n", "feedback", "python", "-m", "Caste_Project.parse.parse_docx",
+                        "--in_dir", str(stage_out),
+                            "--out_dir", str(parse_out),
+                            "--docs_dir", str(stage_out)])
+        
+        # pptx parse 
+        if(stage_out / "pptx_entries.parquet").exists():
+            _run_subprocess(["conda", "run", "-n", "feedback", "python", "-m", "Caste_Project.parse.parse_pptx",
+                            "--in_dir", str(stage_out),
+                            "--out_dir", str(parse_out),
+                            "--docs_dir", str(stage_out),
+                            "--strip_anchor_lines"])
+            
+        # json parse
+        if(stage_out / "json_entries.parquet").exists():
+            _run_subprocess(["conda", "run", "-n", "feedback", "python", "-m", "Caste_Project.parse.parse_json",
+                            "--in_dir", str(stage_out),
+                            "--out_dir", str(parse_out),
+                            "--docs_dir", str(stage_out)])
 
+    else: 
+        print("\n=== SKIPPING PARSE ===")
 
     # ---- CONSOLIDATE ----
     # created Caste_Project.curate.build_feedback_table
+
+    if not args.skip_parse:
+        print("\n=== CONSOLIDATE ===")
+
+        _run_subprocess([
+            "conda", "run", "-n", "feedback", "python", "-m", "Caste_Project.curate.build_feedback_table",
+            "--parse_out_dir", str(parse_out),
+            "--out_path", str(final_out / "feedback_entries.parquet")
+        ])
+    else:
+        print("\n=== SKIPPING CONSOLIDATE (parse skipped) ===")
+
+    """
     _run_subprocess(["conda", "run", "-n", "feedback", "python", "-m", "Caste_Project.curate.build_feedback_table",
                      "--parse_out_dir", str(parse_out),
                      "--out_path", str(final_out / "feedback_entries.parquet")])
@@ -377,6 +492,7 @@ def main() -> None:
     print("Stage:", stage_out)
     print("Parsed:", parse_out)
     print("Final:", final_out / "feedback_entries.parquet")
+    """
 
 
 if __name__ == "__main__":
