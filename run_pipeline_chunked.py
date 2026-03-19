@@ -4,6 +4,27 @@ Docstring for run_pipeline_chunked
 to run: (ensure feedback is activated )
     $env:PYTHONUNBUFFERED="1"; python -u run_pipeline_chunked.py --root "data\_nearly_full_input\Master_Data" --stage_out "data\_stage_master" --parse_out "data\_parse_master" --final_out "data\_final_master" --chunk_size 10
 
+to run parts utilizing flags:
+
+# RUN SCRIPT BUT SKIP INGEST (INGEST ALREADY RAN)
+$env:PYTHONUNBUFFERED="1"; python -u run_pipeline_chunked.py `
+  --root "data\_nearly_full_input\Master_Data" `
+  --stage_out "data\_stage_master" `
+  --parse_out "data\_parse_master" `
+  --final_out "data\_final_master" `
+  --skip_ingest
+
+
+
+# SKIP INGEST & SEGMENT (INGEST + SEGMENT ALREADY RAN AND PARQUET FILES EXIST)
+$env:PYTHONUNBUFFERED="1"; python -u run_pipeline_chunked.py `
+  --root "data\_nearly_full_input\Master_Data" `
+  --stage_out "data\_stage_master" `
+  --parse_out "data\_parse_master" `
+  --final_out "data\_final_master" `
+  --skip_ingest `
+  --skip_segment
+
 """
 
 from __future__ import annotations
@@ -89,7 +110,7 @@ def _run_subprocess(cmd: List[str]) -> None:
     print("\nRUN:", " ".join(cmd))
     subprocess.check_call(cmd, env=env)
 
-
+"""
 def ingest_in_chunks(root: Path, stage_out: Path, exts: List[str], chunk_size: int, limit_total: Optional[int]) -> None:
     stage_out.mkdir(parents=True, exist_ok=True)
 
@@ -201,11 +222,28 @@ def ingest_in_chunks(root: Path, stage_out: Path, exts: List[str], chunk_size: i
         # If doc_id schema differs per handler, this is still safe enough for your scale.
         for ext in exts:
             ext_low = ext.lower()
-            docs_ext = docs_all[docs_all.get("ext", pd.Series([""] * len(docs_all))).astype(str).str.lower() == ext_low].copy() if "ext" in docs_all.columns else pd.DataFrame()
-            # docs from successful extractions likely don't have "ext" column; so we also route by rel_path suffix:
-            if docs_ext.empty and not docs_all.empty and "source_rel_path" in docs_all.columns:
-                docs_ext = docs_all[docs_all["source_rel_path"].astype(str).str.lower().str.endswith(ext_low)].copy()
 
+            # fix attempt 
+            if "source_ext" in docs_all.columns:
+                docs_ext = docs_all[
+                    docs_all["source_ext"].astype(str).str.lower() == ext_low
+                ].copy()
+
+                # fallback 
+            elif "source_rel_path" in docs_all_columns:
+                docs_ext = docs_all[
+                    docs_all["source_rel_path"].astype(str).str.lower().str.endswith(ext_low)
+                ].copy()
+            else:
+                docs_ext = pd.DataFrame()
+    
+            
+            # previously commented out when degbugging parse issue 
+            #docs_ext = docs_all[docs_all.get("ext", pd.Series([""] * len(docs_all))).astype(str).str.lower() == ext_low].copy() if "ext" in docs_all.columns else pd.DataFrame()
+            # docs from successful extractions likely don't have "ext" column; so we also route by rel_path suffix:
+            #if docs_ext.empty and not docs_all.empty and "source_rel_path" in docs_all.columns:
+            #    docs_ext = docs_all[docs_all["source_rel_path"].astype(str).str.lower().str.endswith(ext_low)].copy()
+            
             if docs_ext.empty:
                 continue
 
@@ -270,6 +308,210 @@ def ingest_in_chunks(root: Path, stage_out: Path, exts: List[str], chunk_size: i
         if all_sheets:
             sheets_all = pd.concat(all_sheets, ignore_index=True)
             _append_parquet(stage_out / "excel_sheets.parquet", sheets_all, dedupe_subset=["doc_id", "sheet_name"] if "sheet_name" in sheets_all.columns else ["doc_id"])
+
+    print("\nINGEST COMPLETE.")
+    print(f"Stage outputs in: {stage_out}")
+"""
+
+# new ingest_in_chuncks 
+# previous function error appended all block filetypes together which results in mismatches in doc_ids counts
+
+def ingest_in_chunks(root: Path, stage_out: Path, exts: List[str], chunk_size: int, limit_total: Optional[int]) -> None:
+    stage_out.mkdir(parents=True, exist_ok=True)
+
+    manifest = build_manifest(root)
+    print(f"Discovered {len(manifest)} files total under {root}")
+
+    subset = _filter_manifest(manifest, exts=exts, skip_lockfiles=True)
+
+    if subset.empty:
+        print("No matching files for requested types. Nothing to ingest.")
+        return
+
+    if limit_total is not None:
+        subset = subset.head(limit_total).copy()
+
+    total = len(subset)
+    print(f"Will ingest {total} files (types: {', '.join(exts)}), chunk_size={chunk_size}")
+
+    chunks = _chunk_indices(total, chunk_size)
+    pptx_cfg = PptxReadConfig(ocr_images=True)
+
+    for ci, (start, end) in enumerate(chunks, start=1):
+        chunk = subset.iloc[start:end].copy()
+        print(f"\n=== Chunk {ci}/{len(chunks)}: files {start+1}-{end} of {total} ===")
+
+        # -------------------------
+        # Per-chunk collectors
+        # -------------------------
+        all_docs: List[pd.DataFrame] = []
+
+        docx_blocks_list: List[pd.DataFrame] = []
+        csv_rows_list: List[pd.DataFrame] = []
+        excel_rows_list: List[pd.DataFrame] = []
+        pdf_pages_list: List[pd.DataFrame] = []
+        json_records_list: List[pd.DataFrame] = []
+        txt_lines_list: List[pd.DataFrame] = []
+        pptx_blocks_list: List[pd.DataFrame] = []
+        all_sheets: List[pd.DataFrame] = []
+
+        # -------------------------
+        # Ingest loop
+        # -------------------------
+        for idx, r in chunk.reset_index(drop=True).iterrows():
+            abs_path = Path(r["abs_path"]).resolve()
+            rel_path = str(r["rel_path"])
+            ext = str(r["ext"]).lower()
+
+            global_i = start + idx + 1
+            print(f"[{global_i}/{total}] ingest {ext}  rel={rel_path}")
+
+            try:
+                if ext == ".pdf":
+                    docs_df, pages_df = pdf_extract_to_relational(abs_path, rel_path)
+                    all_docs.append(docs_df)
+                    pdf_pages_list.append(pages_df)
+
+                elif ext == ".docx":
+                    docs_df, blocks_df = extract_docx_to_relational(abs_path, rel_path)
+                    all_docs.append(docs_df)
+                    docx_blocks_list.append(blocks_df)
+
+                elif ext == ".csv":
+                    docs_df, rows_df = extract_csv_to_relational(abs_path, rel_path)
+                    all_docs.append(docs_df)
+                    csv_rows_list.append(rows_df)
+
+                elif ext == ".xlsx":
+                    docs_df, sheets_df, rows_df = extract_excel_to_relational(abs_path, rel_path)
+                    all_docs.append(docs_df)
+                    all_sheets.append(sheets_df)
+                    excel_rows_list.append(rows_df)
+
+                elif ext == ".json":
+                    docs_df, records_df = extract_json_to_relational(abs_path, rel_path)
+                    all_docs.append(docs_df)
+                    json_records_list.append(records_df)
+
+                elif ext == ".txt":
+                    docs_df, lines_df = extract_txt_to_relational(abs_path, rel_path)
+                    all_docs.append(docs_df)
+                    txt_lines_list.append(lines_df)
+
+                elif ext == ".pptx":
+                    docs_df, blocks_df = extract_pptx_to_relational(abs_path, rel_path, pptx_cfg)
+                    all_docs.append(docs_df)
+                    pptx_blocks_list.append(blocks_df)
+
+                else:
+                    raise ValueError(f"Unsupported ext: {ext}")
+
+            except Exception as e:
+                doc_id = _path_hash_id(abs_path)
+                err = f"{type(e).__name__}: {e}"
+                print(f"  ERROR: {err}")
+
+                docs_df = pd.DataFrame([{
+                    "doc_id": doc_id,
+                    "source_file": abs_path.name,
+                    "source_rel_path": rel_path,
+                    "source_ext": ext,
+                    "error": err,
+                }])
+                all_docs.append(docs_df)
+
+        # -------------------------
+        # DOCUMENTS WRITE (fixed)
+        # -------------------------
+        if all_docs:
+            docs_all = pd.concat(all_docs, ignore_index=True)
+        else:
+            docs_all = pd.DataFrame()
+
+        if not docs_all.empty and "source_ext" in docs_all.columns:
+            for ext in exts:
+                ext_low = ext.lower()
+
+                docs_ext = docs_all[
+                    docs_all["source_ext"].astype(str).str.lower() == ext_low
+                ].copy()
+
+                if docs_ext.empty:
+                    continue
+
+                if ext_low == ".csv":
+                    _append_parquet(stage_out / "csv_documents.parquet", docs_ext, ["doc_id"])
+                elif ext_low == ".xlsx":
+                    _append_parquet(stage_out / "excel_documents.parquet", docs_ext, ["doc_id"])
+                elif ext_low == ".pdf":
+                    _append_parquet(stage_out / "pdf_documents.parquet", docs_ext, ["doc_id"])
+                elif ext_low == ".docx":
+                    _append_parquet(stage_out / "docx_documents.parquet", docs_ext, ["doc_id"])
+                elif ext_low == ".json":
+                    _append_parquet(stage_out / "json_documents.parquet", docs_ext, ["doc_id"])
+                elif ext_low == ".txt":
+                    _append_parquet(stage_out / "txt_documents.parquet", docs_ext, ["doc_id"])
+                elif ext_low == ".pptx":
+                    _append_parquet(stage_out / "pptx_documents.parquet", docs_ext, ["doc_id"])
+
+        # -------------------------
+        # BLOCK WRITES (FIXED)
+        # -------------------------
+        if docx_blocks_list:
+            _append_parquet(
+                stage_out / "docx_blocks.parquet",
+                pd.concat(docx_blocks_list, ignore_index=True),
+                ["doc_id", "block_num"]
+            )
+
+        if csv_rows_list:
+            _append_parquet(
+                stage_out / "csv_rows.parquet",
+                pd.concat(csv_rows_list, ignore_index=True),
+                ["doc_id", "row_num"]
+            )
+
+        if excel_rows_list:
+            _append_parquet(
+                stage_out / "excel_rows.parquet",
+                pd.concat(excel_rows_list, ignore_index=True),
+                ["doc_id", "sheet_name", "row_num"]
+            )
+
+        if pdf_pages_list:
+            _append_parquet(
+                stage_out / "pdf_pages.parquet",
+                pd.concat(pdf_pages_list, ignore_index=True),
+                ["doc_id", "page_num"]
+            )
+
+        if json_records_list:
+            _append_parquet(
+                stage_out / "json_records.parquet",
+                pd.concat(json_records_list, ignore_index=True),
+                ["doc_id", "record_num"]
+            )
+
+        if txt_lines_list:
+            _append_parquet(
+                stage_out / "txt_lines.parquet",
+                pd.concat(txt_lines_list, ignore_index=True),
+                ["doc_id", "line_num"]
+            )
+
+        if pptx_blocks_list:
+            _append_parquet(
+                stage_out / "pptx_blocks.parquet",
+                pd.concat(pptx_blocks_list, ignore_index=True),
+                ["doc_id", "slide_num", "block_num"]
+            )
+
+        if all_sheets:
+            _append_parquet(
+                stage_out / "excel_sheets.parquet",
+                pd.concat(all_sheets, ignore_index=True),
+                ["doc_id", "sheet_name"]
+            )
 
     print("\nINGEST COMPLETE.")
     print(f"Stage outputs in: {stage_out}")

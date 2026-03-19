@@ -341,6 +341,11 @@ def parse_docx_entries_to_fields(
 
         # filename-derived
         file_meta = _parse_filename_metadata(source_file) if cfg.prefer_filename_metadata else {"sender": None, "subject": None, "date": None}
+        # update (unsure if this will be the fix yet):
+        #if cfg.prefer_filename_metadata and isinstance(source_file, str):
+        #    file_meta = _parse_filename_metadata(source_file)
+        #else:
+        #    file_meta = {"sender": None, "subject": None, "date": None}
 
         # content-derived
         date_text = _find_first_date_in_text(lines, max_lines=25)
