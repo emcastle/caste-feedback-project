@@ -167,6 +167,7 @@ def build_feedback_table(parse_out_dir: Path, out_path: Path) -> pd.DataFrame:
         unified = unified[unified["entry_type"].fillna("").astype(str).str.lower() != "summary_sheet"].copy()
 
     unified.to_parquet(out_path, index=False)
+    unified.to_csv(out_path.parent / "feedback_entries.csv", index=False)
     return unified
 
 

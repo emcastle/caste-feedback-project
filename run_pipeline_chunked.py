@@ -724,6 +724,7 @@ def main() -> None:
         ])
     else:
         print("\n=== SKIPPING CONSOLIDATE (parse skipped) ===")
+        
 
     """
     _run_subprocess(["conda", "run", "-n", "feedback", "python", "-m", "Caste_Project.curate.build_feedback_table",
